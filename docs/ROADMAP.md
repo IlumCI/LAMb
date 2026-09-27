@@ -2025,6 +2025,256 @@ One thing did transfer. The refusal signal of 3a-xix works on a *retrieval* fail
 not only an arithmetic one: at 0.176 accuracy it accepted 0.2% of problems and was right
 on all of them. A model that cannot do the task declines to answer it.
 
+## 3e. Program writing by outcome, sampled not blended: GRPO with a curriculum bandit
+
+Pre-registered before any run. This section carries the criterion and the design; the
+numbers land in 3e-i once the study finishes.
+
+**The question.** 3a-xii settled that outcome-only induction fails at depth 3 (0.015
+against a supervised 1.000), and 3a-xvi found the failing seeds are *uncommitted* rather
+than wrong: a blurred pointer decodes to a value in neither register ~30% of the time
+(3a-x), so the dense answer gradient the answer-only arm follows is pointed at a soft
+program with no executable meaning. That gradient is biased, not merely noisy. So the
+question 3e asks is narrower than "can outcomes teach a program": it is whether a learning
+rule that only ever scores *hard, valid* programs clears the depth-3 wall the dense-blend
+rule fell off.
+
+**The rule.** Group-relative policy optimisation (GRPO, arXiv:2402.03300), which fits this
+repo for reasons that are structural rather than fashionable:
+
+- The verifier is the exact executor. Reward is `1` iff the decoded answer equals the
+  grammar's answer, and it cannot be hacked because the executor is ground truth, not a
+  learned reward model. This is RLVR with an internal, exact verifier.
+- No value network. The advantage is `(r_i - mean_g) / (std_g + eps)` within a group of
+  `G` programs sampled for one problem, so there is nothing to learn a baseline with and
+  nothing to go stale. This is the whole reason GRPO rather than PPO.
+- Sampling is cheap. A program is tiny and its execution is ~6.5% of a step (`CLAUDE.md`),
+  so `G` hard rollouts per problem cost roughly `G` executions, not `G` forward passes.
+- Nothing differentiable flows through the algebra. The gradient is REINFORCE on the
+  sampled program's log-probability, `-(adv.detach() * logp)`, so the soft-read pathology
+  that biases the answer-only arm cannot arise: only valid programs are ever scored.
+
+**The wall it inherits, and the bandit that is the answer to it.** At depth 3 a random
+program's hit rate is `~(|ops| * n_slots^2)^-n_instr`, astronomically small, so every
+group is all-wrong, `std_g` is zero, the advantage is zero, and GRPO stalls exactly where
+the dense rule did (advantage collapse, arXiv:2605.21125; DAPO's dynamic sampling,
+arXiv:2503.14476, is the standard patch and is applied: degenerate groups are dropped and
+their rate reported as ACR). Two things create gradient where binary reward gives none,
+and both are free here in a way they are not for a text model:
+
+1. **Process reward from the gold trace.** The grammar hands every problem the exact value
+   of every sub-expression (`sample_with_trace`). A sampled program's registers are decoded
+   and scored by how many gold intermediate values they hit, order-free, so a program that
+   computes a right sub-result gets credit before it ever gets the final answer right. It
+   is order-free because 48 distinct programs compute `(a+b)+(c+d)` and conformity is not
+   competence (3a-xii). The hazard is that an intermediate can be hit by coincidence, so
+   `process_coef` is small and outcome dominates; it is a shaping term, not the objective.
+2. **A curriculum bandit over difficulty.** The arms are the task descriptors (depth, and
+   later `shape`/`ops_key`); the bandit keeps training where groups are still informative
+   and grows from there. Its per-arm signal is learnability `p*(1-p)` (Bernoulli variance
+   of the group success rate), which peaks at `p=0.5` — the frontier of learnability
+   (arXiv:2502.12272) — and is tracked as a non-stationary EMA sampled Boltzmann with an
+   epsilon floor (Self-Evolving Curriculum, arXiv:2505.14970). The machine is sized for the
+   deepest arm and shorter problems are padded through the existing identity-register path
+   (3a-xiv), so one machine spans the whole curriculum.
+
+**The Jev borrow, optional and off by default.** Jev (TypeSafe, 2026) is a non-generative
+model that emits a typed value with a calibrated confidence, trained by optimising the
+probability against the outcome rather than against a rater (its "RLCD" is a proper scoring
+rule on outcomes). LAMb already emits a typed value and already has a refusal signal
+(3a-xix), so the only borrowable is calibration: a `calib_coef` term that trains an emitted
+confidence toward the empirical `p(correct)`. It is a proxy on `ptr_sharp` for now, kept at
+zero for the headline comparison so the core result is not entangled with a half-built head.
+
+**Success criteria, pre-registered, honoured whatever the outcome.**
+
+> **H1 (headline).** GRPO with hard sampling and exact verify, *no program supervision*,
+> reaches held-out `answer_acc_hard` within noise of the supervised arm at depth 3, over
+> >=5 seeds, by the exact permutation test in `lamb/study.py`. This is the same question as
+> 3a-xii, asked of sampled-hard programs instead of dense-blended ones.
+>
+> **H2 (the bandit earns its place).** The curriculum bandit reaches H1's criterion in
+> fewer environment steps, or at a lower advantage-collapse rate, than GRPO trained at a
+> fixed depth 3. If H1 passes at fixed depth already, H2 is the only thing the bandit has
+> to justify and it is reported on its own.
+
+`answer_acc_hard` is the measure, not `canonical_acc` (conformity, expected low). A negative
+H1 is a real result and is reported with the same energy as a positive one: it would say
+the depth-3 wall is about *credit* rather than *gradient bias*, which the dense-vs-sampled
+contrast alone cannot distinguish and this arm can. The trainer is `lamb/program_grpo.py`
+(`GRPOTrainer`, `CurriculumBandit`); study.py arms are deferred until the ceiling in 3e-i is
+cleared, since paired arms on an arm that does not reach its own criterion measure nothing.
+
+### 3e-i. What GRPO-over-programs does and does not do yet (findings)
+
+Built and tested (`lamb/program_grpo.py`, `tests/test_program_grpo.py`); the headline H1 is
+**not** achieved and is not claimed. What holds:
+
+- **The loop is sound and generalises where memorisation is blocked.** At 2-digit operands,
+  depth 1, the sampled-hard GRPO reaches held-out `answer_acc_hard` 1.000 with the correct
+  operand-invariant program. At 1-digit it reaches only ~0.08 held-out while fitting the
+  training partition, because the ~180-problem space is memorisable and outcome reward has
+  no pressure to generalise. This reframes 3a-xii, which was measured at 1-digit: part of
+  the outcome-only failure there is a memorisation confound, separable from the depth cliff
+  only at wider operands. It does not overturn 3a-xii (that was dense-blend backprop; this
+  is sampled-hard), but it means the honest comparison must be at a memorisation-resistant
+  width.
+- **Exploration, not gradient, was the first wall, and it is closable.** A collapsed policy
+  cannot sample the correct program, and REINFORCE cannot raise an action it never samples.
+  An entropy floor could not un-collapse a saturated softmax, and a fixed sampling
+  temperature was overwhelmed by logit growth; an epsilon-mixture floor on the sampling
+  distribution, cooled per-arm on that arm's own step count, gives every legal action a
+  probability floor and fixed it. Process reward from the free gold trace, scored only over
+  the result slots a depth actually uses, and no std-normalisation of the advantage
+  (Dr.GRPO, arXiv:2503.20783) were both needed to stop the argmax program oscillating.
+
+What does **not** hold yet:
+
+- **The large register file caps depth-1 consolidation.** In the depth-3-sized machine
+  (`n_operands=9`, `n_slots=16`), even depth-1 training plateaus at ~0.4-0.6 held-out and
+  the argmax program oscillates, though the *same* task in a depth-1-sized machine
+  (`n_operands=3`) reaches 1.000. Attribution runs isolate it: it is not the model size
+  (a `d_model=64` core caps identically to `d_model=96`), not the learning rate, not the
+  process reward, not std-normalisation. It is the register-file width itself, and it blocks
+  the curriculum from graduating past depth 1, so H1 at depth 3 is unreached. This is the
+  open problem; likely candidates are the pointer head scaling with `n_slots` and the
+  latent conditioning under a deeper machine, and it is where the next work goes before any
+  study.py arm is worth running.
+
+The value that transferred anyway: this work established that the emitted program is
+operand-invariant when the core is competent, which is the property 3g turns into an exact
+1:1 self-copy. The supervised core reaches that competence today, so 3g does not wait on
+3e.
+
+## 3f. Verified self-distillation into a smaller student (lossy; a fallback)
+
+Correction of framing, recorded because the distinction is the point. Distillation
+produces a *smaller* student that approximates the teacher; it is lossy by construction
+(bounded by the teacher's coverage, subject to mode collapse) and the pipeline is run by an
+external harness, not by the model. It is therefore **not** the "1:1 cheaper copy the model
+makes of itself" that the north star asks for -- that is 3g, self-compilation, which is
+exact and whose content is the model's own emitted program. 3f is kept as the fallback for
+regimes where 3g does not apply: task classes whose correct program is *not*
+operand-invariant, where no single cached program covers the class and a learned smaller
+core is the only compression available. Use 3g wherever the program is structural (all
+arithmetic measured so far), 3f only where it is not.
+
+Pre-registered before running. A working teacher (the supervised register machine, or a
+GRPO teacher once 3e clears its ceiling) emits programs, and the ones the exact executor
+verifies become supervised data for a *smaller* student. Two arxiv surveys (summarised
+here) converged on the same recipe and the same holes.
+
+**Why this fits LAMb and not a generic LLM.** The distillation family is rejection-
+sampling fine-tuning: sample from the policy, keep only verifier-correct outputs, SFT on
+them, iterate (STaR arXiv:2203.14465, ReST arXiv:2308.08998, ReST-EM arXiv:2312.06585,
+RFT arXiv:2308.01825; DeepSeek-R1's headline is that SFT-distilling verified traces into
+a small dense student beats running RL on the small student, arXiv:2501.12948). Every one
+of these fights label noise from an imperfect verifier. LAMb's verifier is the exact
+executor, so the kept data is label-noise-free by construction, and for any problem the
+teacher *fails*, `gold_program` synthesises a correct program directly -- so the student
+never suffers the coverage starvation (no correct depth-3 data) that is the standard
+failure of this method and the shape of 3a-xii's collapse.
+
+**The recipe, pre-registered.**
+1. Teacher (frozen GRPO+bandit core) samples K programs per problem drawn with
+   `exclude_heldout=True`; the exact executor keeps only those whose decoded answer and
+   every intermediate are representable and correct (report the drop rate; mask, never
+   clip). Problems the teacher never solves get a `gold_program` instead, so coverage is
+   total.
+2. Canonicalise to the shortest verified program (minimum instruction count, ties broken
+   by a fixed order over `(op, ptr_a, ptr_b)` and earliest write), indexing subtrees by
+   traversal position with `is`, never by value. Shortest-program/MDL bias is the
+   regulariser the program-synthesis literature credits for out-of-distribution
+   generalisation (MADIL arXiv:2505.01081, CompressARC arXiv:2512.06104). Keep one extra
+   distinct verified path for a minority of problems, against mode collapse.
+3. Depth-balance the dataset so the hard depths are represented regardless of the
+   teacher's easy-skewed yield -- the coverage control for held-out difficulty.
+4. Student: a lower-`d_model`/fewer-layer core, register file, moduli and token-id layout
+   byte-identical to the teacher (token ids are positional; never renumber). Loss is the
+   existing `gold_program` cross-entropy path in `RegMachineTrainer`, sourced from the
+   canonical verified programs rather than the on-the-fly generator -- deliberately the
+   same objective the exact path already trusts.
+
+**Success criterion.**
+
+> The student matches the teacher's held-out `answer_acc_hard` by depth, at a fraction of
+> the parameters, over >=5 seeds by the permutation test, with **compute matched not
+> steps** (the smaller student gets equal FLOPs, the coconut-long lesson). Report pass@1
+> *and* pass@k>=8 by depth: pass@1 parity with pass@k regression is the mode-collapse
+> signature and is not a pass. Headline is depth-3 held-out accuracy and its sd.
+
+**The holes, recorded before building.** (i) This shares a genome with the retracted
+outcome-induction claim; the defence is that supervision here is the full verified
+*program*, not the outcome, and that difference is a hypothesis to test in `study.py`, not
+an assumption. (ii) A student cannot exceed the teacher's coverage from hard-label SFT
+alone; "student beats teacher" needs an on-policy phase (on-policy distillation survey
+arXiv:2604.00626) and is a separate claim. (iii) Spurious verified programs (right answer,
+wrong path, or a wrapped intermediate that became a legal target) are caught only by
+verifying the whole program and masking every intermediate, and by preserving refusal end
+to end so a wrong program cannot pass as a confident number. (iv) Iterated filter-then-SFT
+saturates in 1-3 rounds and then overfits; cap the iterations. The mechanism is the point:
+it generalises to domains with no gold generator (the language bridge), where the teacher's
+own verified programs are the *only* supervision available.
+
+## 3g. Self-compilation: the model makes an exact 1:1 cheaper copy of itself
+
+Measured, not pre-registered, because the mechanism turned out to already hold and the job
+was to verify it. This is the honest form of "the model creates a cheaper copy of itself":
+the copy is exact (1:1, not a lossy student), and its content -- the algorithm -- is the
+model's own emitted program, not something a harness designed.
+
+**The mechanism.** The register machine's pointers index register *slots*, not values
+(`regmachine.py`), so the program the neural core emits is operand-invariant: the same
+`(op, ptr, ptr)` sequence that solves one problem of a structure solves every problem of
+that structure (CLAUDE.md: one pointer pattern across 300 depth-3 problems, only operators
+varying). The emitted program is thus a complete, exact specification of the core's
+behaviour on the whole task class, executable by the algebra with the neural net removed at
+~6.5% of a step. "The model understands how it works" is literal here rather than a
+metaphor: its reasoning is an inspectable program it emits about its own computation, so
+compiling itself is reading its own algorithm off itself -- run once per structure, record
+the argmax program, keep the library. `lamb/selfcompile.py`: `compile_model` reads the
+library off the core, `CompiledModel.solve` runs the executor-only copy, `verify` measures
+fidelity against the core.
+
+**Measured (supervised teacher, 2-digit, `d_model=64`).**
+
+| depth | patterns | distinct programs / pattern | held-out coverage | 1:1 fidelity | compiled acc | speedup |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 8 | 1 | 1.000 | **1.000** | 1.000 | 3.1x |
+| 3 | 128 | 1 | 1.000 | **1.000** | 1.000 | 3.7x |
+
+`fidelity` is the fraction of held-out problems where the compiled copy reproduces the
+*core's own* decoded output, not merely the truth -- the copy claim. Every operator pattern
+needed exactly one program (`max_variants == 1`), so the class is fully compilable: 8
+programs *are* the depth-2 core, 128 programs *are* the depth-3 core, exactly. The 3-4x is a
+floor measured on a tiny core with an unoptimised Python executor; the asymptotic is set by
+the 6.5%/93.5% execution/forward split, i.e. ~15x once the forward dominates.
+
+**The boundary, kept honest.** The copy's algorithm is the model's; the caching and lookup
+are a harness, and `compile_model` never substitutes the gold program for the model's own
+(it copies what the model does, not what it should do). What is *not* yet the model's: the
+decision to compile and to route work to the copy. Full autonomy -- the model choosing at
+runtime to compile a structure it keeps seeing and to dispatch subtasks to its cheaper
+copies, which is the multi-agent-workflow goal -- needs one architectural addition: a
+**dispatch instruction** the core can emit, whose executor runs a named compiled copy on a
+sub-expression and writes the returned value into a register. The register machine already
+composes sub-results this way for arithmetic; a dispatch op makes the sub-solver a cheaper
+copy of the model instead of a `+`. That is the next build, and it is the point where "for
+its own benefit" becomes real: a deep task decomposed across many cheap 1:1 copies, each
+compiled from the core, orchestrated by a program the core wrote. Pre-registration for it:
+
+> A depth-D task solved by a program that dispatches its depth-<=k subtrees to compiled
+> copies reaches the same held-out accuracy as the monolithic core at strictly lower cost,
+> over >=5 seeds. The copies must be exact (3g fidelity 1.000), so the only thing being
+> tested is whether the core can emit a correct dispatch structure -- which is the same
+> program-induction question as 3e, one level up.
+
+The holes to watch, from the same scars as everywhere else: an uncovered structure must be
+reported, never silently run on the core (a copy that falls back to the original is not a
+copy); the dispatch op's executor must be exact or it breaks the 1:1 property; and whether
+the *core can learn to emit dispatch programs* is a learned claim and goes through
+`lamb/study.py` like every other.
+
 ## 4. Deeper test-time memory (ATLAS)
 
 Upgrade the linear delta-rule memory to a small non-linear MLP memory with a
