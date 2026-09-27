@@ -16,7 +16,8 @@ import torch
 from lamb import ArithmeticTokenizer, LotusConfig
 from lamb.config import ModelConfig
 from lamb.regmachine import RegMachineTrainer
-from lamb.selfcompile import CompiledModel, compile_model, op_pattern, verify
+from lamb.selfcompile import (CompiledModel, compile_model, op_pattern,
+                              solve_hierarchical, tree_depth, verify)
 from lamb.alu import parse_expr
 
 
@@ -72,6 +73,44 @@ def test_compiled_copy_is_an_exact_1to1_reproduction_of_the_core():
     assert v["fidelity"] == 1.0
     # And a faithful copy of a correct core is itself correct.
     assert v["compiled_acc"] == v["core_acc"]
+
+
+def _gold_copy(depth, n=400):
+    # A compiled copy whose library is gold programs -- tests the orchestration mechanism
+    # without training, since the copies must be exact for the hierarchical claim anyway.
+    t = _teacher(depth=depth, steps=1)
+    tasks = t.inner._sample_batch(n)
+    _, golds, _, _, _ = t._prepare(tasks)
+    lib = {}
+    for task, gold in zip(tasks, golds):
+        lib.setdefault(op_pattern(parse_expr(task[0])), gold)
+    return CompiledModel(library=lib, n_operands=t.n_operands, n_instr=t.n_instr,
+                         out_reg=t.n_operands + t.n_instr - 1, machine=t.machine,
+                         prepare=t._prepare, depth=depth)
+
+
+def test_cheaper_copies_solve_a_task_deeper_than_any_of_them():
+    # The multi-agent claim (ROADMAP 3g): depth-4 problems, which no depth-<=2 copy can
+    # solve monolithically, are solved exactly by orchestrating depth-1 and depth-2 copies
+    # -- every step a cheap copy, composition included. Length generalisation by
+    # decomposition, exact because the copies are exact and operand-invariant.
+    import random
+    from fractions import Fraction
+
+    from lamb.selfplay.grammar import Descriptor, TaskGrammar
+
+    copies = {1: _gold_copy(1), 2: _gold_copy(2)}
+    g, rng = TaskGrammar(), random.Random(0)
+    desc = Descriptor(depth=4, digits=2, ops_key=0, shape=0)
+    n, correct = 60, 0
+    for _ in range(n):
+        expr, ans, _ = g.sample_with_trace(desc, rng.randint(0, 2**31 - 1))
+        assert tree_depth(parse_expr(expr)) == 4
+        got, calls = solve_hierarchical(copies, expr)
+        assert calls >= 4          # multiple copy invocations, i.e. a real decomposition
+        if got is not None and got == Fraction(int(ans)):
+            correct += 1
+    assert correct / n == 1.0      # exact, because the copies are exact
 
 
 def test_uncovered_structure_is_reported_not_silently_bridged():

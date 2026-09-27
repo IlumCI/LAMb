@@ -2250,18 +2250,25 @@ programs *are* the depth-2 core, 128 programs *are* the depth-3 core, exactly. T
 floor measured on a tiny core with an unoptimised Python executor; the asymptotic is set by
 the 6.5%/93.5% execution/forward split, i.e. ~15x once the forward dominates.
 
-**The boundary, kept honest.** The copy's algorithm is the model's; the caching and lookup
-are a harness, and `compile_model` never substitutes the gold program for the model's own
-(it copies what the model does, not what it should do). What is *not* yet the model's: the
-decision to compile and to route work to the copy. Full autonomy -- the model choosing at
-runtime to compile a structure it keeps seeing and to dispatch subtasks to its cheaper
-copies, which is the multi-agent-workflow goal -- needs one architectural addition: a
-**dispatch instruction** the core can emit, whose executor runs a named compiled copy on a
-sub-expression and writes the returned value into a register. The register machine already
-composes sub-results this way for arithmetic; a dispatch op makes the sub-solver a cheaper
-copy of the model instead of a `+`. That is the next build, and it is the point where "for
-its own benefit" becomes real: a deep task decomposed across many cheap 1:1 copies, each
-compiled from the core, orchestrated by a program the core wrote. Pre-registration for it:
+**Multi-agent decomposition, measured.** `solve_hierarchical` (`lamb/selfcompile.py`) solves
+a task deeper than any single copy using only cheaper copies: a subtree within a copy's
+depth is solved by that copy, and two sub-results are combined by a *depth-1 copy* solving
+``"v_left op v_right"`` -- not by Python arithmetic, so every step of the reasoning is a
+cheap 1:1 copy. It works at any magnitude because the copies' programs are operand-invariant.
+Measured: depth-4 problems, which a depth-2 core cannot solve monolithically at all, solved
+by orchestrating a depth-1 copy (2 programs) and a depth-2 copy (8 programs) at **1.000
+accuracy over 200 tasks, ~7 copy-calls each**. That is length generalisation by
+decomposition, exact because the copies are exact.
+
+**The boundary, kept honest.** The copy's algorithm is the model's; the caching, lookup, and
+*the decomposition routing* are a harness. What is not yet the model's: the decision to
+compile and to route. Full autonomy -- the model choosing at runtime to compile a structure
+it keeps seeing and emitting a program that dispatches subtasks to its cheaper copies --
+needs one architectural addition: a **dispatch instruction** the core can emit, whose
+executor runs a named compiled copy on a sub-expression and writes the returned value into a
+register. `solve_hierarchical` already proves the executor side works and is exact; what
+remains is the core *emitting* the dispatch structure instead of a harness imposing it.
+Pre-registration for that learned step:
 
 > A depth-D task solved by a program that dispatches its depth-<=k subtrees to compiled
 > copies reaches the same held-out accuracy as the monolithic core at strictly lower cost,

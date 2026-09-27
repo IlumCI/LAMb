@@ -66,6 +66,7 @@ class CompiledModel:
     out_reg: int
     machine: object
     prepare: object
+    depth: int = 0
     rational: bool = False
     variants: Dict[Pattern, int] = field(default_factory=dict)
 
@@ -141,8 +142,72 @@ def compile_model(rmt, n_samples: int = 2048, batch: int = 256,
     return CompiledModel(
         library=library, n_operands=rmt.n_operands, n_instr=rmt.n_instr,
         out_reg=rmt.n_operands + rmt.n_instr - 1, machine=rmt.machine,
-        prepare=rmt._prepare, rational=bool(getattr(rmt, "rational", False)),
+        prepare=rmt._prepare, depth=int(rmt.cfg.depth),
+        rational=bool(getattr(rmt, "rational", False)),
         variants={p: len(v) for p, v in variants.items()})
+
+
+def tree_depth(t) -> int:
+    """Nesting depth of an expression tree; a leaf ``(op, a, b)`` is depth 1."""
+    if isinstance(t[1], int):
+        return 1
+    return 1 + max(tree_depth(t[1]), tree_depth(t[2]))
+
+
+def tree_to_expr(t) -> str:
+    """Serialise a subtree back to the grammar's own string form, so a compiled copy
+    can parse it and load its operands with the same fixed map the core uses."""
+    if isinstance(t[1], int):
+        return f"{t[1]}{t[0]}{t[2]}"
+    return f"({tree_to_expr(t[1])}){t[0]}({tree_to_expr(t[2])})"
+
+
+def solve_hierarchical(copies: Dict[int, CompiledModel], expr: str
+                       ) -> Tuple[Optional[Fraction], int]:
+    """Solve a task deeper than any single copy, using only cheaper copies of the model.
+
+    This is the multi-agent step (ROADMAP 3g): a task too deep for one copy is decomposed,
+    each subtree within a copy's depth is solved by that copy, and two sub-results are
+    combined by a *depth-1 copy* solving ``"v_left op v_right"`` -- not by Python
+    arithmetic, so every step of the reasoning is a cheap 1:1 copy of the model. It works
+    for values of any magnitude because the copies' programs are operand-invariant (their
+    pointers are structural), which is the same property that made compilation exact.
+
+    Returns ``(value, n_calls)`` where ``n_calls`` counts copy invocations. The routing
+    here is structural, not learned; the model emitting its own dispatch program is 3g's
+    pre-registered next step. Requires a depth-1 copy for composition and, for efficiency,
+    the deepest copy available at or below each subtree's depth.
+    """
+    from .alu import parse_expr
+
+    one = copies.get(1)
+    if one is None:
+        raise ValueError("hierarchical solving needs a depth-1 copy for composition")
+    depths = sorted(copies)
+    calls = [0]
+
+    def best_copy_for(d: int) -> Optional[CompiledModel]:
+        usable = [k for k in depths if k <= d]
+        return copies[max(usable)] if usable else None
+
+    def rec(t) -> Optional[Fraction]:
+        d = tree_depth(t)
+        c = best_copy_for(d)
+        if c is not None and c.depth >= d and c.covers(tree_to_expr(t)):
+            calls[0] += 1
+            vals, cov = c.solve([(tree_to_expr(t), "0", [])])
+            if cov[0] and vals[0] is not None:
+                return vals[0]
+        if isinstance(t[1], int):                 # a leaf no copy covered: unsolved
+            return None
+        lv, rv = rec(t[1]), rec(t[2])
+        if lv is None or rv is None:
+            return None
+        calls[0] += 1                              # compose via a depth-1 copy
+        vals, cov = one.solve([(f"{lv}{t[0]}{rv}", "0", [])])
+        return vals[0] if cov[0] else None
+
+    return rec(parse_expr(expr)), calls[0]
 
 
 @torch.no_grad()
