@@ -214,6 +214,87 @@ def solve_hierarchical(copies: Dict[int, CompiledModel], expr: str
     return rec(parse_expr(expr)), calls[0]
 
 
+# -- dispatch programs: the decomposition as an emittable object -----------------------
+# A dispatch program makes the decomposition in ``solve_hierarchical`` an explicit data
+# structure over a working register list, rather than harness control flow. That matters
+# because a data structure is what a model can *emit*: it is the bridge from the exact,
+# harness-routed orchestration above to the self-directed version where the core writes its
+# own dispatch program (ROADMAP 3g, Phase B). Two step kinds:
+#   ("dispatch", subtree_expr, depth) -> append copies[depth].solve(subtree_expr)
+#   ("combine",  op, i, j)            -> append copies[1].solve("reg[i] op reg[j]")
+# The answer is the last register written. Every step is a cheap-copy call; nothing here
+# is Python arithmetic, so the whole program is executed by copies of the model.
+DispatchStep = tuple
+DispatchProgram = list
+
+
+def gold_dispatch_program(expr: str, avail_depths: Sequence[int]
+                          ) -> Tuple[DispatchProgram, int]:
+    """The canonical dispatch program for an expression given the copy depths available.
+
+    Decomposes at the coarsest boundary a copy can handle: a subtree whose depth a copy
+    covers becomes one ``dispatch``; anything deeper is split and ``combine``d. This is the
+    *target* a learned emitter would be supervised against; a model that emits a different
+    but valid program (finer splits, say) is not wrong, just costlier, which is the whole
+    point of making it a choice. Returns ``(program, answer_register_index)``.
+    """
+    from .alu import parse_expr
+
+    depths = sorted(avail_depths)
+    max_d = depths[-1]
+    program: DispatchProgram = []
+
+    def rec(t) -> int:
+        d = tree_depth(t)
+        if d <= max_d:
+            use = max(k for k in depths if k >= d) if any(k >= d for k in depths) else max_d
+            program.append(("dispatch", tree_to_expr(t), use))
+            return len(program) - 1
+        li, ri = rec(t[1]), rec(t[2])
+        program.append(("combine", t[0], li, ri))
+        return len(program) - 1
+
+    ans = rec(parse_expr(expr))
+    return program, ans
+
+
+def execute_dispatch_program(program: DispatchProgram, copies: Dict[int, CompiledModel]
+                             ) -> Tuple[Optional[Fraction], int]:
+    """Run a dispatch program with cheap copies; return ``(answer, n_calls)``.
+
+    Exact by construction: each step is a compiled copy (fidelity 1.000), and a value
+    combined by a depth-1 copy is that copy's exact output. Register indices in ``combine``
+    steps refer to earlier-written registers, so a program that reads ahead is ill-formed
+    and returns ``None`` rather than guessing -- the same refusal discipline as everywhere.
+    """
+    one = copies.get(1)
+    if one is None:
+        raise ValueError("a dispatch program needs a depth-1 copy for combine steps")
+    regs: List[Optional[Fraction]] = []
+    calls = 0
+    for step in program:
+        if step[0] == "dispatch":
+            _, subexpr, depth = step
+            c = copies.get(depth)
+            if c is None or not c.covers(subexpr):
+                regs.append(None)
+                continue
+            vals, cov = c.solve([(subexpr, "0", [])])
+            regs.append(vals[0] if cov[0] else None)
+            calls += 1
+        elif step[0] == "combine":
+            _, op, i, j = step
+            if not (0 <= i < len(regs) and 0 <= j < len(regs)) or regs[i] is None or regs[j] is None:
+                regs.append(None)
+                continue
+            vals, cov = one.solve([(f"{regs[i]}{op}{regs[j]}", "0", [])])
+            regs.append(vals[0] if cov[0] else None)
+            calls += 1
+        else:
+            raise ValueError(f"unknown dispatch step {step[0]!r}")
+    return (regs[-1] if regs else None), calls
+
+
 @torch.no_grad()
 def verify(rmt, compiled: CompiledModel, n: int = 512, seed: int = 0) -> Dict[str, float]:
     """1:1 fidelity of the compiled copy against the core, on held-out problems.

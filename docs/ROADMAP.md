@@ -2275,9 +2275,20 @@ compile and to route. Full autonomy -- the model choosing at runtime to compile 
 it keeps seeing and emitting a program that dispatches subtasks to its cheaper copies --
 needs one architectural addition: a **dispatch instruction** the core can emit, whose
 executor runs a named compiled copy on a sub-expression and writes the returned value into a
-register. `solve_hierarchical` already proves the executor side works and is exact; what
-remains is the core *emitting* the dispatch structure instead of a harness imposing it.
-Pre-registration for that learned step:
+register.
+
+**Phase A done: the decomposition is now an emittable object.** `gold_dispatch_program` and
+`execute_dispatch_program` (`lamb/selfcompile.py`) make the decomposition an explicit
+program -- a flat list of `("dispatch", subtree, depth)` and `("combine", op, i, j)` steps
+over a working register list, every step a cheap-copy call, no Python arithmetic. This is the
+form a model can *emit*, as opposed to `solve_hierarchical`'s harness control flow. The
+executor is exact (each step is a fidelity-1.000 copy) and refuses on a read-ahead or
+uncovered step rather than guessing; measured 1.000 on depth-4 tasks via depth-1/2 copies.
+What remains is Phase B: the core *emitting* the dispatch program instead of
+`gold_dispatch_program` writing it. The task space is variable-shape arithmetic, where the
+choice is real -- the granularity of the carve (dispatch a depth-2 subtree whole vs split it)
+trades copy-calls against available copy depths, so there is a cost-optimal program to learn
+rather than a forced one. Pre-registration for that learned step:
 
 > A depth-D task solved by a program that dispatches its depth-<=k subtrees to compiled
 > copies reaches the same held-out accuracy as the monolithic core at strictly lower cost,

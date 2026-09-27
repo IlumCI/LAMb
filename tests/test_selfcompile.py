@@ -16,8 +16,9 @@ import torch
 from lamb import ArithmeticTokenizer, LotusConfig
 from lamb.config import ModelConfig
 from lamb.regmachine import RegMachineTrainer
-from lamb.selfcompile import (CompiledModel, compile_model, op_pattern,
-                              solve_hierarchical, tree_depth, verify)
+from lamb.selfcompile import (CompiledModel, compile_model,
+                              execute_dispatch_program, gold_dispatch_program,
+                              op_pattern, solve_hierarchical, tree_depth, verify)
 from lamb.alu import parse_expr
 
 
@@ -128,6 +129,34 @@ def test_cheaper_copies_solve_a_task_deeper_than_any_of_them():
         if got is not None and got == Fraction(int(ans)):
             correct += 1
     assert correct / n == 1.0      # exact, because the copies are exact
+
+
+def test_dispatch_program_is_an_emittable_exact_decomposition():
+    # The decomposition as an explicit program object (the emittable form a model would
+    # write), executed only by cheap copies. gold_dispatch_program builds the canonical
+    # one; execute_dispatch_program runs it exactly. Both dispatch and combine steps must
+    # appear (a real decomposition), and the answer must be exact.
+    import random
+    from fractions import Fraction
+
+    from lamb.selfplay.grammar import Descriptor, TaskGrammar
+
+    copies = {1: _gold_copy(1), 2: _gold_copy(2)}
+    g, rng = TaskGrammar(), random.Random(1)
+    desc = Descriptor(depth=4, digits=2, ops_key=0, shape=0)
+    n, correct = 40, 0
+    saw_dispatch = saw_combine = False
+    for _ in range(n):
+        expr, ans, _ = g.sample_with_trace(desc, rng.randint(0, 2**31 - 1))
+        program, _ = gold_dispatch_program(expr, avail_depths=[1, 2])
+        saw_dispatch |= any(s[0] == "dispatch" for s in program)
+        saw_combine |= any(s[0] == "combine" for s in program)
+        got, calls = execute_dispatch_program(program, copies)
+        assert calls >= 4
+        if got is not None and got == Fraction(int(ans)):
+            correct += 1
+    assert saw_dispatch and saw_combine
+    assert correct / n == 1.0
 
 
 def test_uncovered_structure_is_reported_not_silently_bridged():
