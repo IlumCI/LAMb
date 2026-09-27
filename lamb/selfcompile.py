@@ -32,21 +32,25 @@ from .alu import parse_expr
 from .regmachine import run_program
 
 Instr = Tuple[int, int, int]
-Pattern = Tuple[str, ...]
+Pattern = tuple  # a nested tuple: (op, left_pattern, right_pattern) or (op,) at a leaf
 
 
 def op_pattern(tree) -> Pattern:
-    """Post-order operator signature of an expression tree.
+    """Structural signature of an expression tree: operators *and* shape, no operands.
 
-    The structural key the compiled copy looks a program up by, and it is readable from
-    the *input* by parsing -- no neural net. A leaf ``(op, a, b)`` contributes its
-    operator; an internal node contributes its children's then its own. For a balanced
-    depth-2 tree ``(a o1 b) o0 (c o2 d)`` this is ``(o1, o2, o0)``, which with the fixed
-    slot-indexed pointer structure determines the whole program.
+    The key the compiled copy looks a program up by, readable from the *input* by parsing
+    -- no neural net. It must encode the tree's shape, not just its operators: a flat
+    operator sequence collides on unbalanced trees, where two different shapes can share a
+    post-order operator sequence but need different pointer programs (``((a+b)+c)+d`` and
+    ``(a+b)+(c+d)`` are both ``[+, +, +]`` yet route differently). Measured on a variable-
+    shape teacher, the flat key produced patterns needing several distinct programs;
+    nesting the children under each node fixes it. A leaf ``(op, a, b)`` is ``(op,)``; a
+    node is ``(op, left, right)``. Balanced trees are unaffected (still 8 keys at depth 2,
+    128 at depth 3), since for a fixed shape the nesting is a relabelling of the same set.
     """
     if isinstance(tree[1], int):
         return (tree[0],)
-    return op_pattern(tree[1]) + op_pattern(tree[2]) + (tree[0],)
+    return (tree[0], op_pattern(tree[1]), op_pattern(tree[2]))
 
 
 @dataclass

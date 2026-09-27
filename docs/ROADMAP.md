@@ -2238,17 +2238,26 @@ fidelity against the core.
 
 **Measured (supervised teacher, 2-digit, `d_model=64`).**
 
-| depth | patterns | distinct programs / pattern | held-out coverage | 1:1 fidelity | compiled acc | speedup |
+| structure | patterns | distinct programs / pattern | held-out coverage | 1:1 fidelity | compiled acc | speedup |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2 | 8 | 1 | 1.000 | **1.000** | 1.000 | 3.1x |
-| 3 | 128 | 1 | 1.000 | **1.000** | 1.000 | 3.7x |
+| balanced depth 2 | 8 | 1 | 1.000 | **1.000** | 1.000 | 3.1x |
+| balanced depth 3 | 128 | 1 | 1.000 | **1.000** | 1.000 | 3.7x |
+| unbalanced (shape=1, depth<=3) | 200 | 1 | 1.000 | **1.000** | 1.000 | -- |
 
 `fidelity` is the fraction of held-out problems where the compiled copy reproduces the
-*core's own* decoded output, not merely the truth -- the copy claim. Every operator pattern
-needed exactly one program (`max_variants == 1`), so the class is fully compilable: 8
-programs *are* the depth-2 core, 128 programs *are* the depth-3 core, exactly. The 3-4x is a
-floor measured on a tiny core with an unoptimised Python executor; the asymptotic is set by
-the 6.5%/93.5% execution/forward split, i.e. ~15x once the forward dominates.
+*core's own* decoded output, not merely the truth -- the copy claim. Every structure needed
+exactly one program (`max_variants == 1`), so the class is fully compilable: 8 programs *are*
+the depth-2 core, 128 *are* the depth-3 core, 200 *are* the variable-shape core, exactly. The
+3-4x is a floor measured on a tiny core with an unoptimised Python executor; the asymptotic
+is set by the 6.5%/93.5% execution/forward split, i.e. ~15x once the forward dominates.
+
+**The key must encode shape, not just operators.** The first version keyed the library by a
+flat post-order operator sequence, which is wrong for unbalanced trees: two shapes can share
+an operator sequence but route differently (`((a+b)+c)+d` and `(a+b)+(c+d)` are both
+`[+,+,+]`). Measured on the shape=1 core, the flat key collided on 28 patterns (up to 2
+programs each) while the nested key `(op, left, right)` gave 200 keys with zero collisions and
+fidelity 1.000. The fix matters because real problems are not balanced trees, so the general
+self-copy needs a structural key -- `op_pattern` in `lamb/selfcompile.py` is now that.
 
 **Multi-agent decomposition, measured.** `solve_hierarchical` (`lamb/selfcompile.py`) solves
 a task deeper than any single copy using only cheaper copies: a subtree within a copy's

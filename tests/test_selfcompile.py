@@ -34,10 +34,27 @@ def _teacher(depth=2, steps=400, d_model=48):
     return t
 
 
-def test_op_pattern_is_the_post_order_operator_signature():
-    # "(6+6)-(4-8)" parses to ('-', ('+',6,6), ('-',4,8)); post-order ops are +, -, -.
-    assert op_pattern(parse_expr("(6+6)-(4-8)")) == ("+", "-", "-")
+def test_op_pattern_encodes_shape_not_just_operators():
+    # Nested key: a leaf is (op,), a node is (op, left, right). It must encode shape, so a
+    # flat operator sequence is wrong -- two unbalanced trees can share operators but need
+    # different programs. "(6+6)-(4-8)" -> ('-', ('+',), ('-',)); "12+7" -> ('+',).
+    assert op_pattern(parse_expr("(6+6)-(4-8)")) == ("-", ("+",), ("-",))
     assert op_pattern(parse_expr("12+7")) == ("+",)
+
+
+def test_key_distinguishes_shapes_a_flat_key_would_collide():
+    # Two full binary trees, same post-order operators, different shape. A flat operator
+    # sequence keys them the same (and one cached program cannot serve both, measured: 28
+    # such collisions on a trained unbalanced core); the nested key keeps them apart.
+    def flat(t):
+        if isinstance(t[1], int):
+            return (t[0],)
+        return flat(t[1]) + flat(t[2]) + (t[0],)
+
+    right_deep = parse_expr("(1+2)+((3+4)+(5+6))")
+    left_deep = parse_expr("((1+2)+(3+4))+(5+6)")
+    assert flat(right_deep) == flat(left_deep)                 # flat key collides
+    assert op_pattern(right_deep) != op_pattern(left_deep)     # nested key does not
 
 
 def test_solve_runs_the_library_program_not_the_core():
