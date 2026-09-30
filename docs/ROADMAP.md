@@ -2296,6 +2296,46 @@ rather than a forced one. Pre-registration for that learned step:
 > tested is whether the core can emit a correct dispatch structure -- which is the same
 > program-induction question as 3e, one level up.
 
+**Phase B, measured: the core writes its own dispatch program** (`lamb/dispatch.py`). At
+every internal node the core votes dispatch-or-split; leaves always dispatch; applied top
+down the votes determine one program, which the exact executor runs. The copies cover every
+subtree of depth <= 2 and only *balanced* depth-3 subtrees (the depth-3 copy was compiled on
+balanced trees), so the cost-optimal program needs the core to know what its copies can do:
+an unbalanced depth-3 subtree must be split, a balanced one should not be (on shape=1 trees
+the depth-3 subtrees split 74 covered / 131 not, so the question is genuinely two-sided).
+The core is causal, so each node is read at the end of its span, where the whole subtree has
+been seen, concatenated with the state at its start. Trained on shape=1 depth <= 4, evaluated
+held-out on depth 4 and on unseen depth 5, every program *executed*, two seeds per arm:
+
+| signal | depth 4 acc | calls (gold 3.17, split 7.01) | depth 5 acc (unseen) | calls (gold 4.18, split 9.01) |
+| --- | --- | --- | --- | --- |
+| `probe`: query copies on every subtree | 1.000 / 1.000 | 3.17 / 3.17 | 0.940 / 0.980 | 3.87 / 4.11 |
+| `outcome`: whole-program reward | 1.000 / 0.810 | 7.01 / 4.34 | 1.000 / 0.680 | 9.01 / 4.51 |
+| `feedback`: per-attempt accept/refuse | 0.745 / 0.685 | 2.05 / 2.35 | 0.600 / 0.470 | 2.27 / 1.86 |
+
+No arm uses an external label. `probe`'s target is `covering_depth` -- literally "would my
+copy accept this subtree", answered by the copy's own library -- so it is the core querying
+its copies about every subtree and learning to predict their competence. Applied top down that
+prediction *is* the cost-optimal rule, and the core reproduces it exactly on held-out depth 4
+(vote accuracy 1.000, calls equal to gold, 2.2x fewer than always-split) and mostly transfers
+one level deeper, erring toward over-dispatch there (fewer calls than gold, 2-6% refusals).
+The coverage oracle used during training agreed with real execution on every evaluated row.
+
+Learning only from experience while solving does not converge yet. Whole-program reward
+collapses to always-split -- splitting is always valid, early high dispatches fail, the
+dispatch probability runs to zero, and every group becomes identical; an epsilon floor on the
+votes (the program_grpo fix) moves one seed off it but into over-reaching. The credit problem
+is that one bad vote zeroes the whole program. Rewarding each attempted dispatch by whether its
+copy accepted it fixes the credit but starves the signal: ~1.2 attempts per program against
+~3-4 probed nodes, concentrated wherever the policy already goes, and both seeds over-dispatch.
+The one caveat on provenance: these copies' libraries were built from gold programs, which is
+equivalent to compiling a fidelity-1.000 core (3g) but not literally the same run.
+
+What this establishes for the self-copy goal: the model can hold an accurate, learned model of
+its own copies' competence, acquired by querying them rather than from a teacher, and use it to
+write the cheapest program that routes a task across them. What it does not yet establish: that
+it can acquire that self-model from task experience alone.
+
 The holes to watch, from the same scars as everywhere else: an uncovered structure must be
 reported, never silently run on the core (a copy that falls back to the original is not a
 copy); the dispatch op's executor must be exact or it breaks the 1:1 property; and whether
