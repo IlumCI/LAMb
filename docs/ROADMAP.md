@@ -2368,8 +2368,70 @@ What this establishes for the self-copy goal: the model can hold an accurate, le
 its own copies' competence and use it to write the cheapest program that routes a task across
 them, and it can acquire that self-model from its own task experience alone -- the hand-offs it
 made while solving and whether each was taken -- as well as it can by querying its copies
-directly, using fewer interactions. What it does not yet establish: the model deciding *when* to
-compile a new copy, which is still a harness step.
+directly, using fewer interactions. Deciding *when* to compile a new copy was the remaining harness
+step; Phase C below takes it over, with a fixed expected-value trigger reading only the model's
+own experience.
+
+**Phase C, pre-registered: the model decides when to compile a new copy of itself.** Until now
+compilation was a harness step. Here the model runs a stream of deep tasks with copies that
+cover depth <= 2 and *no* depth-3 structure. Work its copies refuse is split (a refused hand-off
+falls back to splitting, so misrouting costs calls and never correctness). Each depth-3 subtree
+it had to split is logged by structure key with the value it obtained the slow way. When a key
+has recurred enough that a copy would pay for itself -- (times seen) x (calls saved each time)
+>= (instances checked) x (cost of one core forward in copy-calls, 4, measured 3-4x in 3g) -- it
+compiles one from its own neural core: runs the core on the logged instances and adopts the
+program only if the core emits the *same* program on every instance and that program reproduces
+the values it already computed through its trusted copies. The copy is verified against the
+model's own decomposition; there is no external oracle. Routing (experience mode, online) must
+then discover that the copy now accepts that work.
+
+The boundary, stated in advance: the trigger is a fixed expected-value rule; what it decides on
+-- which structures recur, what they cost, whether the core's program is consistent and right --
+is entirely the model's own experience. Criteria, three seeds, same stream per seed:
+
+> 1. By the end of the stream, greedy calls per task under self-directed compilation are within
+>    10% of a copy precompiled up front over the core's own distribution.
+> 2. Every adopted copy passes self-verification, and executed accuracy stays 1.000 throughout.
+> 3. Self-directed compilation's total cost over the stream (copy calls including exploration,
+>    plus 4 x core forwards spent compiling) is below never compiling.
+
+Up-front compilation's total cost is reported beside it, with the caveat that it depends on how
+the structure space is enumerated in advance, which the self-directed version never needs to know.
+
+**Phase C, measured (`lamb/selfimprove.py`): all three criteria pass on all five seeds.** The
+core is one variable-shape depth-3 register machine at accuracy 1.000; the stream is 6400
+shape=1 depth<=5 tasks (200 rounds of 32); routing learns online in experience mode from
+scratch; the same stream per seed for all three arms.
+
+| arm | final greedy calls/task (ideal 2.86) | accuracy | core forwards | total cost/task over stream |
+| --- | --- | --- | --- | --- |
+| never compile | 5.36-5.37 | 1.000 | 0 | 6.16 +- 0.06 |
+| compile up front | 2.86-2.92 | 1.000 | 3000 | 5.59 +- 0.08 |
+| **model decides when** | **2.86-2.90** | **1.000** | **576** | **4.59 +- 0.08** |
+
+Starting with no depth-3 copy at all, every seed discovered and compiled the entire depth-3
+structure space of the workload -- 192 structures, three core forwards each -- purely from work it
+kept doing the slow way: ~110-120 structures by round 50, all 192 by round 150. Every one passed
+self-verification (192 adopted, 0 rejected per seed), executed accuracy was 1.000 at every
+checkpoint, and routing to the new copies rose from 0 to 0.98-1.00 on its own, i.e. the
+experience-mode self-model tracked a copy set that was changing under it. Criterion 1: final calls
+within 2% of up-front and at the ideal. Criterion 3: total cost 25% below never compiling (paired
+difference -1.57 per task) and also 18% below up-front (-0.99). Every seed agrees in direction; the
+exact paired two-sided p is 0.0625 for both, which is the floor at five seeds -- consistency, not a
+significance claim beyond that.
+
+Where the advantage over up-front comes from, precisely: self-directed spends *more* copy calls on
+the stream (26.4-27.9k against 23.1-24.5k), because it does the early work the slow way before it
+has compiled anything. It wins on total only through compile cost: 576 forwards, exactly three per
+structure it actually needed, found without knowing the structure space, against 3000 sampled
+forwards to be sure of covering it. A targeted up-front enumeration would also cost 576 -- but only
+for something that already knew the space. The holes: (i) the forward cost of 4 copy-calls was
+measured on tiny cores; at scale it is larger (~15x), which delays the trigger and makes up-front
+dearer, so the numbers move though the direction should not; (ii) the core here is perfect, so the
+rejection path never fired in the stream -- it is exercised only by a unit test with an untrained
+core, which it correctly refuses; (iii) the core's scope (depth <= 3) is given to the compiler, not
+discovered; (iv) this workload uses its whole structure space, so "compile only what you need" is
+not tested against a workload that needs a subset, where it should matter more.
 
 The holes to watch, from the same scars as everywhere else: an uncovered structure must be
 reported, never silently run on the core (a copy that falls back to the original is not a
