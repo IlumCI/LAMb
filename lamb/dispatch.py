@@ -24,13 +24,15 @@ decision rather than asserted.
 subtree. Each node is read at the *end* of its span, where the whole subtree has been seen,
 concatenated with the state at the span's start.
 
-**Three training signals, none an external label.** ``probe``: the model asks its copies
+**Four training signals, none an external label.** ``probe``: the model asks its copies
 about every subtree -- "would you accept this?" -- and fits the answers (binary
 cross-entropy). The target is the copies' own competence, read from their libraries, not a
 teacher's program; applied top down it is also the cost-optimal rule. ``outcome``: decisions
 are sampled, the whole program is scored by success and call count, and a group-relative
 REINFORCE step is taken. ``feedback``: each dispatch actually attempted while solving is
-rewarded by whether its copy accepted it. Coverage stands in for executing during training,
+rewarded by whether its copy accepted it. ``experience``: the same accept/refuse
+observations from its own hand-offs, used as prediction targets instead of rewards -- the
+one that learns the self-model from experience alone (ROADMAP 3g). Coverage stands in for executing during training,
 which is exact because the copies are (3g fidelity 1.000); :meth:`DispatchTrainer.evaluate`
 checks it by executing every program (``oracle_agree``).
 """
@@ -226,7 +228,7 @@ class DispatchTrainer:
                  device: str = "cpu"):
         from .selfplay.grammar import Descriptor, TaskGrammar
 
-        if mode not in ("probe", "outcome", "feedback"):
+        if mode not in ("probe", "outcome", "feedback", "experience"):
             raise ValueError(f"unknown mode {mode!r}")
         torch.manual_seed(seed)
         self.copies = copies
@@ -268,8 +270,10 @@ class DispatchTrainer:
             stats = {"acc": float(((lg > 0).float() == y).float().mean())}
         elif self.mode == "outcome":
             loss, stats = self._outcome_loss(roots, logits)
-        else:
+        elif self.mode == "feedback":
             loss, stats = self._feedback_loss(roots, logits)
+        else:
+            loss, stats = self._experience_loss(roots, logits)
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
@@ -348,6 +352,79 @@ class DispatchTrainer:
                 else sum(lg.sum() for lg in logits) * 0.0)
         return loss, {"accept_rate": accepts / max(1, attempts),
                       "attempts": attempts / max(1, len(roots) * self.group)}
+
+    def _experience_loss(self, roots, logits):
+        """Learn a self-model from the hand-offs actually made while solving.
+
+        The accept/refuse a copy returns is an *observation*, not just a reward. Feedback
+        mode pushed it through REINFORCE, which keeps only its sign relative to a zero
+        baseline and pays policy-gradient variance for it. Here it is a prediction target
+        instead: the dispatch head is trained, by binary cross-entropy, to predict whether
+        its copy will accept a subtree, on exactly the subtrees it chose to send while
+        solving (sampled with an epsilon floor so uncertain ones keep getting tried). The
+        policy is then "dispatch where acceptance is predicted". Still experience alone:
+        a node the model never tried contributes nothing, unlike ``probe``, which asks the
+        copies about every subtree of every problem.
+        """
+        feats, targets, attempts, accepts = [], [], 0, 0
+        for root, lg in zip(roots, logits):
+            nodes = internal_nodes(root)
+            index = {id(n): k for k, n in enumerate(nodes)}
+            probs = ((1 - self.explore) * torch.sigmoid(lg) + self.explore * 0.5).detach()
+            tried: Dict[int, float] = {}
+            for _ in range(self.group):
+                votes = torch.bernoulli(probs)
+                _, _, used = program_outcome(
+                    root, lambda n: bool(votes[index[id(n)]]), self.copies)
+                for n in used:
+                    k = index[id(n)]
+                    if votes[k] > 0.5 and k not in tried:
+                        tried[k] = 1.0 if covering_depth(n, self.copies) is not None else 0.0
+            for k, y in tried.items():
+                feats.append(lg[k])
+                targets.append(y)
+            attempts += len(tried)
+            accepts += sum(tried.values())
+        if not feats:
+            return sum(lg.sum() for lg in logits) * 0.0, {"accept_rate": 0.0, "tried": 0.0}
+        lg_all = torch.stack(feats)
+        y_all = torch.tensor(targets, device=lg_all.device)
+        loss = F.binary_cross_entropy_with_logits(lg_all, y_all)
+        return loss, {"accept_rate": accepts / max(1, attempts),
+                      "tried": attempts / max(1, len(roots))}
+
+    @torch.no_grad()
+    def category_rates(self, n: int = 200, depth: Optional[int] = None,
+                       seed: int = 999) -> Dict[str, Tuple[float, int]]:
+        """Dispatch-vote rate per node category on held-out trees, ``(rate, count)``.
+
+        Categories are what the copies can and cannot take: depth 2 (always covered),
+        depth 3 balanced (covered), depth 3 unbalanced (refused), depth >= 4 (refused).
+        The correct policy is 1, 1, 0, 0; this shows *where* a policy is wrong, which the
+        single vote accuracy hides.
+        """
+        from .selfplay.grammar import Descriptor
+
+        self.policy.eval()
+        desc = Descriptor(depth or self.desc.depth, self.digits, 0, 1)
+        rng = random.Random(seed)
+        exprs = []
+        while len(exprs) < n:
+            e, _ = self.grammar.sample_heldout(desc, rng.randint(0, 2 ** 31 - 1))
+            if not parse_nodes(e).is_leaf():
+                exprs.append(e)
+        roots = [parse_nodes(e) for e in exprs]
+        logits = self.policy.node_logits(exprs, roots, self.device)
+        tally: Dict[str, List[int]] = {}
+        for root, lg in zip(roots, logits):
+            for k, nd in enumerate(internal_nodes(root)):
+                d = tree_depth(nd.tree())
+                if d == 3:
+                    cat = "d3_bal" if covering_depth(nd, self.copies) else "d3_unbal"
+                else:
+                    cat = f"d{min(d, 4)}{'+' if d >= 4 else ''}"
+                tally.setdefault(cat, []).append(int(lg[k] > 0))
+        return {c: (sum(v) / len(v), len(v)) for c, v in sorted(tally.items())}
 
     @torch.no_grad()
     def evaluate(self, n: int = 200, depth: Optional[int] = None,

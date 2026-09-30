@@ -101,7 +101,7 @@ def test_coverage_oracle_agrees_with_execution(copies):
         assert c <= c_pred                            # executor stops calling after a refusal
 
 
-@pytest.mark.parametrize("mode", ["probe", "outcome", "feedback"])
+@pytest.mark.parametrize("mode", ["probe", "outcome", "feedback", "experience"])
 def test_each_mode_takes_a_finite_step(copies, mode):
     tr = DispatchTrainer(copies, ModelConfig(d_model=32, n_heads=2, d_ff=64,
                                              recurrent_steps=2),
@@ -113,3 +113,28 @@ def test_each_mode_takes_a_finite_step(copies, mode):
     assert any((x - y).abs().sum() > 0 for x, y in zip(after, before)) or mode != "probe"
     ev = tr.evaluate(n=10)
     assert 0.0 <= ev["accuracy"] <= 1.0 and ev["oracle_agree"] == 1.0
+
+
+def test_experience_learns_only_from_attempted_handoffs(copies):
+    # The experience signal must come solely from subtrees the model actually handed off
+    # while solving. A policy that never dispatches (all logits very negative, no
+    # exploration) attempts nothing and so has nothing to learn from -- unlike probe,
+    # which would still get a label for every node.
+    tr = DispatchTrainer(copies, ModelConfig(d_model=32, n_heads=2, d_ff=64,
+                                             recurrent_steps=2),
+                         ArithmeticTokenizer(), depth=4, mode="experience",
+                         batch_size=8, group=2, explore=0.0)
+    exprs = tr._batch(8)
+    roots = [parse_nodes(e) for e in exprs]
+    never = [torch.full((len(internal_nodes(r)),), -50.0) for r in roots]
+    _, st = tr._experience_loss(roots, never)
+    assert st["tried"] == 0.0
+
+
+def test_category_rates_cover_the_four_kinds_of_node(copies):
+    tr = DispatchTrainer(copies, ModelConfig(d_model=32, n_heads=2, d_ff=64,
+                                             recurrent_steps=2),
+                         ArithmeticTokenizer(), depth=4, mode="experience", batch_size=8)
+    rates = tr.category_rates(n=60)
+    assert {"d2", "d3_bal", "d3_unbal", "d4+"} <= set(rates)
+    assert all(0.0 <= r <= 1.0 for r, _ in rates.values())

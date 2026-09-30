@@ -2321,13 +2321,40 @@ prediction *is* the cost-optimal rule, and the core reproduces it exactly on hel
 one level deeper, erring toward over-dispatch there (fewer calls than gold, 2-6% refusals).
 The coverage oracle used during training agreed with real execution on every evaluated row.
 
-Learning only from experience while solving does not converge yet. Whole-program reward
-collapses to always-split -- splitting is always valid, early high dispatches fail, the
-dispatch probability runs to zero, and every group becomes identical; an epsilon floor on the
-votes (the program_grpo fix) moves one seed off it but into over-reaching. The credit problem
-is that one bad vote zeroes the whole program. Rewarding each attempted dispatch by whether its
-copy accepted it fixes the credit but starves the signal: ~1.2 attempts per program against
-~3-4 probed nodes, concentrated wherever the policy already goes, and both seeds over-dispatch.
+**Learning the self-model from experience alone: it converges, once the observation is used
+as a target rather than a reward.** Whole-program reward collapses to always-split --
+splitting is always valid, early high dispatches fail, the dispatch probability runs to zero,
+and every group becomes identical; an epsilon floor (the program_grpo fix) moves one seed off
+it but into over-reaching. One bad vote zeroes the whole program, so the credit is unassignable.
+Rewarding each attempted hand-off by whether its copy accepted it (`feedback`, REINFORCE, zero
+baseline) fixes the credit and still fails. This was first put down here to the signal being
+starved; that diagnosis was wrong. A per-category breakdown of the votes shows the failure is
+specific: `feedback` learns to dispatch everything its copies take (depth 2, balanced depth 3:
+1.00) but never learns to stop handing off what they refuse (unbalanced depth 3: 0.27, depth
+>= 4: 0.32 still dispatched), and it plateaus there from step 1000 to 2000.
+
+The same observations used as *prediction targets* fix it. `experience` mode trains the dispatch
+head, by binary cross-entropy, to predict whether its copy will accept a subtree -- on exactly
+the subtrees it chose to hand off while solving, sampled with an epsilon floor so uncertain ones
+keep getting tried -- and dispatches where acceptance is predicted. A node it never tried
+contributes nothing; `probe`, by contrast, asks the copies about every subtree of every problem.
+Pre-registered criterion: both seeds reach held-out depth-4 accuracy >= 0.95 with vote accuracy
+within 0.02 of `probe`. It passed, and was then run to five seeds against five of `probe`:
+
+| | depth 4 (5 seeds each) | depth 5 unseen acc | depth 5 vote acc | queries per problem |
+| --- | --- | --- | --- | --- |
+| `probe` (asks about every subtree) | 1.000, 3.17 calls, sd 0 | 0.958 +- 0.020 | 0.988 +- 0.006 | ~3.0 |
+| `experience` (only its own hand-offs) | 1.000, 3.17 calls, sd 0 | 0.952 +- 0.016 | 0.985 +- 0.004 | 1.6-2.0 |
+
+Exact paired permutation tests: depth-5 accuracy difference -0.006, p = 0.69; vote accuracy
+-0.003, p = 0.38. Indistinguishable -- with five seeds at this spread the design cannot resolve
+differences below ~0.03, and none is claimed. The per-category votes converge by step 500 to
+exactly 1 / 1 / 0 / 0. Run end to end against copies the cores compiled from themselves, it gives
+the same result (depth 4: 1.000 at 3.17 calls; depth 5: 0.935). A plausible reason for the
+feedback/experience gap, not separately tested: the cross-entropy gradient is proportional to the
+prediction error, so correct confident predictions stop pushing and the remaining errors get the
+signal, while the zero-baseline policy gradient keeps pushing on every accepted hand-off, and
+through the shared representation that holds up similar-looking subtrees the copies refuse.
 **End to end, no gold anywhere in the copies.** The table above used copies built from gold
 programs for speed. Re-run with copies the cores compiled from themselves: depth-1/2/3 cores
 trained to 1.000, each compiled to 2 / 8 / 128 programs at fidelity 1.000 with one program
@@ -2338,9 +2365,11 @@ the model's: cores that compile themselves into exact copies, and a core that ha
 those copies can do and writes the cheapest program routing a task across them.
 
 What this establishes for the self-copy goal: the model can hold an accurate, learned model of
-its own copies' competence, acquired by querying them rather than from a teacher, and use it to
-write the cheapest program that routes a task across them. What it does not yet establish: that
-it can acquire that self-model from task experience alone.
+its own copies' competence and use it to write the cheapest program that routes a task across
+them, and it can acquire that self-model from its own task experience alone -- the hand-offs it
+made while solving and whether each was taken -- as well as it can by querying its copies
+directly, using fewer interactions. What it does not yet establish: the model deciding *when* to
+compile a new copy, which is still a harness step.
 
 The holes to watch, from the same scars as everywhere else: an uncovered structure must be
 reported, never silently run on the core (a copy that falls back to the original is not a
