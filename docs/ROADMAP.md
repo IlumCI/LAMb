@@ -2328,8 +2328,14 @@ votes (the program_grpo fix) moves one seed off it but into over-reaching. The c
 is that one bad vote zeroes the whole program. Rewarding each attempted dispatch by whether its
 copy accepted it fixes the credit but starves the signal: ~1.2 attempts per program against
 ~3-4 probed nodes, concentrated wherever the policy already goes, and both seeds over-dispatch.
-The one caveat on provenance: these copies' libraries were built from gold programs, which is
-equivalent to compiling a fidelity-1.000 core (3g) but not literally the same run.
+**End to end, no gold anywhere in the copies.** The table above used copies built from gold
+programs for speed. Re-run with copies the cores compiled from themselves: depth-1/2/3 cores
+trained to 1.000, each compiled to 2 / 8 / 128 programs at fidelity 1.000 with one program
+per structure, then the `probe` dispatch policy trained against *those* copies: depth 4
+accuracy 1.000 at 3.17 calls (= gold), unseen depth 5 0.940 at 3.87 calls, vote accuracy
+0.983, oracle agreement 1.000 -- the same numbers as the gold-copy run. So the whole chain is
+the model's: cores that compile themselves into exact copies, and a core that has learned what
+those copies can do and writes the cheapest program routing a task across them.
 
 What this establishes for the self-copy goal: the model can hold an accurate, learned model of
 its own copies' competence, acquired by querying them rather than from a teacher, and use it to
