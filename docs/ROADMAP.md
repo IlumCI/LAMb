@@ -1898,6 +1898,44 @@ Known limits, recorded rather than left implicit:
   spot is `0 ÷ 0`; a zero divisor with a live numerator is detected by the residual
   itself. See 3a-xi, including where I had that wrong.
 
+**Trained, measured: 0.0159 exact match on GSM8K test (21 of 1319), against a ceiling of 0.691.**
+The first real number. Getting to it meant fixing four faults that would each have made any number
+meaningless, then two that stopped learning:
+
+- *Wrong CLI default.* ``--n-operands`` defaulted to 12, overriding the config's 20; the config's own
+  measurement is that 12 halves program coverage (0.68 -> 0.25). The CLI now reads the config.
+- *NaN program loss from step 1.* Rows without a recovered program borrowed another row's program as a
+  zero-weighted stand-in, whose pointers could address registers masked for *this* row: infinite
+  cross-entropy times zero weight is nan (the weights survived only because the zero also zeroed the
+  gradient). The stand-in is now all-zero pointers, legal everywhere, and a non-finite loss raises.
+- *Soft evaluation.* Exact match was decoded from the soft program, which 3a-x measured lands in neither
+  register ~30% of the time. It is now the argmax program executed exactly, over the full test set,
+  checked by feeding it the gold programs (300/300).
+- *Silent misalignment risk.* Examples are matched to the encoder cache by position; a dropped row would
+  pair every later question with the wrong embedding. Now an error.
+- *Collapse to the average program.* The model predicted ``*`` -- the padding operator, so the most
+  common op overall -- at every instruction of every problem: op accuracy rose with position
+  (0.11 -> 0.59) exactly as that predicts, and op logits varied across problems by 0.16. The soft-program
+  answer loss was the cause; with it off, program loss falls (1.38 -> 0.97 at 400 steps), op logits spread
+  (1.16), and argmax programs go from 54 to 210 distinct over 256 problems.
+- *Index pointers need counting.* Operand registers hold the text's numbers in reading order, so an index
+  pointer must say "the third number". The fix 3d found for the same problem is applied: a content
+  pointer scores each operand register by the encoder state at the token where its quantity appears
+  (anchors verified 1207/1209), constants get learned keys. Its contribution under program-only training
+  was not separately ablated.
+
+Then, with content pointers and program-only loss, 5000 steps: training program loss falls to 0.16 while
+test exact match stays at 0.010-0.025 throughout. It memorises the 5080 annotated programs and does not
+generalise. Whether the encoder can carry what is needed was probed directly: a linear probe on
+mean-pooled MiniLM states predicts "the solution divides" at 0.682 against a 0.512 majority, so the
+information is partly there; Qwen3-0.6B's layer 21 reaches 0.774. A larger language model was **not**
+adopted as the encoder: if it reads the problem, it has largely solved it, and the core would be executing
+its plan -- the opposite of the point. It remains only as the measuring arm 3c already pre-registers.
+What would plausibly move the number, in order: far more program-annotated data than 5080 (self-generated
+problems in the GSM8K style, where gold programs are free); the outcome-only expert iteration of 3e-ii,
+which reached depth 3 on arithmetic, applied here so the 31% of problems without an annotation still train;
+and extraction recall, since 22% of test problems are missing a needed number before the model starts.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and

@@ -366,8 +366,12 @@ class RegisterMachine(nn.Module):
 
     def run(self, latent_h: torch.Tensor, values: Sequence[Sequence[int]],
             tau: float = 0.0, hard: bool = False,
-            counts: Optional[torch.Tensor] = None):
+            counts: Optional[torch.Tensor] = None, logits=None):
         """Execute the emitted program. Returns ``(register file, logits)``.
+
+        ``logits`` lets a caller supply its own ``(op, ptr_a, ptr_b)`` logits -- the
+        language bridge scores operand registers by content rather than by slot index --
+        while execution stays exactly this machine's.
 
         The operands are loaded exactly -- they are digits in the prompt and the
         digit->residue map is a known fixed function (ROADMAP 3a-vi: asking the
@@ -375,7 +379,7 @@ class RegisterMachine(nn.Module):
         is spent on arithmetic the model should not be learning, and the only thing
         being tested is whether it can emit the right *program*.
         """
-        op_l, a_l, b_l = self.logits(latent_h, counts)
+        op_l, a_l, b_l = self.logits(latent_h, counts) if logits is None else logits
         if self.rational:
             vals = [[v if isinstance(v, Fraction) else Fraction(int(v)) for v in row]
                     for row in values]

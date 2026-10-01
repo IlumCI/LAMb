@@ -327,10 +327,42 @@ class Example:
     scales: List[int]
     count: int
     program: Optional[List[Instr]] = None
+    # Encoder token index of the quantity in each operand register (-1: a constant or an
+    # empty slot). Only used by the content pointer.
+    anchors: Optional[List[int]] = None
 
     @property
     def fractions(self) -> List[Fraction]:
         return [Fraction(v, 10 ** s) for v, s in zip(self.values, self.scales)]
+
+
+def quantity_anchors(texts: Sequence[str], n_operands: int, n_const: int,
+                     encoder: str, max_len: int, lexical: bool = True) -> List[List[int]]:
+    """Where each operand register's quantity sits in the encoder's tokenisation.
+
+    Register ``n_const + k`` holds the k-th quantity in reading order (the same order
+    :func:`registers_from_quantities` fills them), so its anchor is the first encoder token
+    covering that quantity's first character. Tokenised exactly as :func:`encode_dataset`
+    did (special tokens on, truncated at ``max_len``), so the indices line up with the
+    cached states. A quantity past the truncation point gets -1.
+    """
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(encoder)
+    room = n_operands - n_const
+    out = []
+    for t in texts:
+        qs = all_quantities(t, lexical=lexical)[:room]
+        offs = tok(t, truncation=True, max_length=max_len,
+                   return_offsets_mapping=True)["offset_mapping"]
+        row = [-1] * n_operands
+        for k, q in enumerate(qs):
+            for ti, (a, b) in enumerate(offs):
+                if b > a and b > q.start:
+                    row[n_const + k] = ti
+                    break
+        out.append(row)
+    return out
 
 
 def build_examples(rows: Sequence[Dict[str, str]], n_operands: int, n_instr: int,
@@ -483,6 +515,10 @@ class BridgeConfig:
     grad_clip: float = 1.0
     seed: int = 0
     program_coef: float = 1.0     # 0.0 is the answer-only arm
+    # Score operand registers by *content* -- the encoder state where each quantity sits --
+    # instead of by slot index. Index-by-order needs the model to count ("the 3rd number in
+    # the text"), which is the failure the infContext work hit (3d) and fixed this way.
+    content_pointer: bool = False
     answer_coef: float = 1.0
     den_zero_coef: float = 1.0
     device: str = "auto"
@@ -524,17 +560,49 @@ class BridgeReasoner(nn.Module):
         self.machine = RegisterMachine(cfg.d_model, cfg.n_operands, cfg.n_instr,
                                        ResidueSystem(tuple(cfg.rational_moduli)),
                                        device=device, rational=True)
+        self.cfg = cfg
+        if cfg.content_pointer:
+            d = cfg.d_model
+            self.key_proj = nn.Linear(d_enc, d)
+            self.const_key = nn.Parameter(torch.randn(len(cfg.constants), d) * 0.02)
+            self.miss_key = nn.Parameter(torch.zeros(d))
+            self.q_a = nn.Linear(d, d)
+            self.q_b = nn.Linear(d, d)
+
+    def _content_logits(self, latent_h, enc, anchors, counts):
+        """Operand-register pointer logits from content; result registers unchanged."""
+        cfg = self.cfg
+        op_l, a_l, b_l = self.machine.logits(latent_h, counts)
+        n_op, nc, b = cfg.n_operands, len(cfg.constants), enc.size(0)
+        tokstate = torch.gather(enc, 1, anchors.clamp_min(0).unsqueeze(-1)
+                                .expand(-1, -1, enc.size(-1)))
+        keys = self.key_proj(tokstate)
+        keys = torch.where((anchors >= 0).unsqueeze(-1), keys,
+                           self.miss_key.expand_as(keys))
+        keys = torch.cat([self.const_key.unsqueeze(0).expand(b, -1, -1), keys[:, nc:]], 1)
+        h = latent_h[:, :cfg.n_instr]
+        scale = cfg.d_model ** -0.5
+        legal = (torch.arange(n_op, device=enc.device).view(1, 1, -1)
+                 < counts.view(-1, 1, 1))
+        ca = (torch.einsum("bid,bjd->bij", self.q_a(h), keys) * scale).masked_fill(
+            ~legal, float("-inf"))
+        cb = (torch.einsum("bid,bjd->bij", self.q_b(h), keys) * scale).masked_fill(
+            ~legal, float("-inf"))
+        return (op_l, torch.cat([ca, a_l[..., n_op:]], -1),
+                torch.cat([cb, b_l[..., n_op:]], -1))
 
     def forward(self, enc: torch.Tensor, pad_mask: torch.Tensor,
                 values: Sequence[Sequence[Fraction]], counts: torch.Tensor,
-                tau: float = 0.0, hard: bool = False):
+                tau: float = 0.0, hard: bool = False, anchors=None):
         x = self.front(enc, pad_mask)                    # (B, K, d) -- length-invariant
         # The resampler's output has no padding by construction: K learned queries
         # attend over whatever was there, so a paragraph and a sentence both arrive
         # as exactly K vectors. That is the whole reason it is here.
         pad = torch.zeros(x.size(0), x.size(1), dtype=torch.bool, device=x.device)
         _, _, latent_h, _ = self.core.latent_block(x, pad)
-        return self.machine.run(latent_h, values, tau, hard, counts=counts)
+        logits = (self._content_logits(latent_h, enc, anchors, counts)
+                  if self.cfg.content_pointer else None)
+        return self.machine.run(latent_h, values, tau, hard, counts=counts, logits=logits)
 
 
 # ---------------------------------------------------------------------------
@@ -566,11 +634,13 @@ class BridgeTrainer:
         e = enc["enc"][list(idx)].to(self.device).float()
         m = enc["pad_mask"][list(idx)].to(self.device)
         counts = torch.tensor([r.count for r in rows], device=self.device)
-        return rows, e, m, counts
+        anchors = (torch.tensor([r.anchors for r in rows], device=self.device)
+                   if self.cfg.content_pointer else None)
+        return rows, e, m, counts, anchors
 
     def _losses(self, idx: Sequence[int], examples, enc):
-        rows, e, m, counts = self._batch(idx, examples, enc)
-        regs, logits = self.model(e, m, [r.fractions for r in rows], counts)
+        rows, e, m, counts, anchors = self._batch(idx, examples, enc)
+        regs, logits = self.model(e, m, [r.fractions for r in rows], counts, anchors=anchors)
         # Every row is in the ring or it is not a row: unlike the grammar, the ring
         # here is the 4.5e15 rational one and a grade-school quantity does not come
         # close, but the check is kept rather than assumed because the denominators
@@ -589,7 +659,11 @@ class BridgeTrainer:
         if have:
             pm = torch.zeros(len(rows), device=self.device)
             pm[have] = 1.0
-            filler = rows[have[0]].program
+            # The stand-in must be *legal for every row*. Borrowing another row's program
+            # was not: its pointers can address registers masked out for this row, whose
+            # cross-entropy is infinite, and inf * 0 = nan -- the logged loss was nan from
+            # step 1. All-zero pointers address register 0, which every row has.
+            filler = [(0, 0, 0)] * self.cfg.n_instr
             golds = [r.program if r.program is not None else filler for r in rows]
             prog = self.model.machine.program_loss(logits, golds, pm)
         else:
@@ -603,6 +677,9 @@ class BridgeTrainer:
                             generator=self._rng).tolist()
         prog, ans, extra, *_ = self._losses(idx, self.train_ex, self.enc_train)
         loss = self.cfg.program_coef * prog + self.cfg.answer_coef * ans
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss at step {step}: prog {float(prog)} "
+                                     f"ans {float(ans)}")
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
@@ -613,22 +690,52 @@ class BridgeTrainer:
         return out
 
     @torch.no_grad()
-    def evaluate(self, n: int = 512) -> Dict[str, float]:
-        """Exact-match on the official test split, plus the ring's own diagnostics."""
+    def evaluate(self, n: Optional[int] = None, batch: int = 256) -> Dict[str, float]:
+        """Exact-match on the official test split, read from the *decided* program.
+
+        ``exact_match`` executes the argmax program as a real program: op and pointers
+        decided, then run through the exact rational executor. The soft program is not
+        scored -- decoding takes an argmax per modulus independently, so a blended pointer
+        decodes to a value in neither register ~30% of the time (3a-x), and an undecided
+        model would be graded on something it never computes. ``exact_match_soft`` is kept
+        beside it only so the gap is visible. The denominator is every test problem
+        evaluated, so anything the pipeline cannot answer counts as wrong.
+        """
+        from .regmachine import run_program
+
         if not self.test_ex or self.enc_test is None:
             return {}
         self.model.eval()
-        idx = list(range(min(n, len(self.test_ex))))
-        prog, ans, _, regs, rows, _ = self._losses(idx, self.test_ex, self.enc_test)
-        alg, sysm = self.model.machine.alg, self.model.machine.sys
-        nums = sysm.decode(alg.unpack(regs.num[:, self.out_reg]))
-        dens = sysm.decode(alg.unpack(regs.den[:, self.out_reg]))
-        got = [None if d == 0 else Fraction(nn_, d) for nn_, d in zip(nums, dens)]
-        ok = sum(1 for g, r in zip(got, rows) if g is not None and g == r.answer)
-        return {"exact_match": ok / max(1, len(rows)),
-                "zero_den": sum(1 for g in got if g is None) / max(1, len(got)),
-                "max_den_magnitude": float(max(abs(d) for d in dens)),
-                "program_loss": float(prog), "answer_loss": float(ans)}
+        total = len(self.test_ex) if n is None else min(n, len(self.test_ex))
+        hard_ok = soft_ok = has_prog = hard_on_prog = 0
+        sysm, alg = self.model.machine.sys, self.model.machine.alg
+
+        def frac(regs):
+            nums = sysm.decode(alg.unpack(regs.num[:, self.out_reg]))
+            dens = sysm.decode(alg.unpack(regs.den[:, self.out_reg]))
+            return [None if d == 0 else Fraction(a, d) for a, d in zip(nums, dens)]
+
+        for lo in range(0, total, batch):
+            idx = list(range(lo, min(total, lo + batch)))
+            rows, e, m, counts, anchors = self._batch(idx, self.test_ex, self.enc_test)
+            regs, (op_l, a_l, b_l) = self.model(e, m, [r.fractions for r in rows], counts,
+                                                anchors=anchors)
+            soft = frac(regs)
+            oi, ai, bi = op_l.argmax(-1), a_l.argmax(-1), b_l.argmax(-1)
+            progs = [[(int(oi[i, t]), int(ai[i, t]), int(bi[i, t]))
+                      for t in range(self.cfg.n_instr)] for i in range(len(rows))]
+            hard = frac(run_program(self.model.machine, [r.fractions for r in rows], progs,
+                                    str(self.device)))
+            for r, h, s_ in zip(rows, hard, soft):
+                hard_ok += h is not None and h == r.answer
+                soft_ok += s_ is not None and s_ == r.answer
+                if r.program is not None:
+                    has_prog += 1
+                    hard_on_prog += h is not None and h == r.answer
+        return {"exact_match": hard_ok / max(1, total),
+                "exact_match_soft": soft_ok / max(1, total),
+                "exact_match_where_program_exists": hard_on_prog / max(1, has_prog),
+                "n": float(total)}
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +769,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--d-model", type=int, default=256)
-    p.add_argument("--n-operands", type=int, default=12)
+    p.add_argument("--n-operands", type=int, default=BridgeConfig.n_operands)
     p.add_argument("--n-instr", type=int, default=8)
     p.add_argument("--n-latent", type=int, default=8)
     p.add_argument("--program-coef", type=float, default=1.0,
@@ -672,13 +779,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
     p.add_argument("--eval-every", type=int, default=250)
+    p.add_argument("--answer-coef", type=float, default=BridgeConfig.answer_coef,
+                   help="weight of the soft-program answer loss; 0 trains on programs only")
+    p.add_argument("--content-pointer", action="store_true",
+                   help="score operand registers by encoder content instead of slot index")
     a = p.parse_args(argv)
 
     cfg = BridgeConfig(encoder=a.encoder, cache_dir=a.cache, steps=a.steps,
                        batch_size=a.batch, d_model=a.d_model,
                        n_operands=a.n_operands, n_instr=a.n_instr,
                        n_latent=a.n_latent, program_coef=a.program_coef,
-                       lexical=not a.no_lexical, seed=a.seed, device=a.device)
+                       lexical=not a.no_lexical, seed=a.seed, device=a.device,
+                       content_pointer=a.content_pointer, answer_coef=a.answer_coef)
 
     if a.encode:
         for split in ("train", "test"):
@@ -716,6 +828,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     missing = [s for s, path in paths.items() if not os.path.exists(path)]
     if missing:
         p.error(f"no encoder cache for {missing}; run --encode first")
+    # Examples are matched to the encoder cache by *position*. build_examples drops rows
+    # with no parseable answer, which would silently pair every later problem with the
+    # wrong question's embedding, so a drop must stop the run rather than shift it.
+    for name, ex, rows in (("train", tr_ex, train_rows), ("test", te_ex, test_rows)):
+        if len(ex) != len(rows):
+            p.error(f"{name}: {len(rows) - len(ex)} rows dropped; examples would no longer "
+                    f"line up with the encoder cache")
+    if cfg.content_pointer:
+        for ex, rows in ((tr_ex, train_rows), (te_ex, test_rows)):
+            anchors = quantity_anchors([r["question"] for r in rows], cfg.n_operands,
+                                       len(cfg.constants), cfg.encoder, cfg.max_len,
+                                       cfg.lexical)
+            for e_, a_ in zip(ex, anchors):
+                e_.anchors = a_
     tr = BridgeTrainer(cfg, tr_ex, load_encoded(paths["train"]),
                        te_ex, load_encoded(paths["test"]))
     for s in range(cfg.steps):
@@ -723,7 +849,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if (s + 1) % a.eval_every == 0 or s == 0:
             e = tr.evaluate(512)
             print(f"step {s + 1:>5}  loss {m['loss']:.4f}  prog {m['program']:.4f}  "
-                  f"ans {m['answer']:.4f}  exact_match {e.get('exact_match', 0):.4f}")
+                  f"ans {m['answer']:.4f}  exact_match {e.get('exact_match', 0):.4f} "
+                  f"(soft {e.get('exact_match_soft', 0):.4f})", flush=True)
+    e = tr.evaluate()
+    print(f"FINAL full test (n={int(e['n'])}): exact_match {e['exact_match']:.4f}  "
+          f"soft {e['exact_match_soft']:.4f}  "
+          f"where a program exists {e['exact_match_where_program_exists']:.4f}  "
+          f"(test program coverage, the pipeline's ceiling: {te_stats['program_coverage']:.3f})",
+          flush=True)
 
 
 if __name__ == "__main__":
