@@ -236,9 +236,39 @@ deciding what "half" means.
 
 ---
 
+## The engine: train, compile, solve, verify
+
+The packaged form of what works (`lamb/engine.py`, `lamb/progexec.py`). A register-machine core
+learns to write programs **from final answers alone** (expert iteration over its own verified
+samples, a fresh-operand check against coincidences, and self-composition of deeper programs from
+shallower ones), then compiles itself into a JSON library of exact programs, one per structure.
+
+```bash
+lamb-engine train   --depths 1 2 3 --steps 1000 --ckpt engine.pt   # ~6 min, one CPU thread
+lamb-engine compile --ckpt engine.pt --library engine.json         # verified program library
+lamb-engine solve   --library engine.json --ckpt engine.pt "(12+7)-(30-4)"
+lamb-engine bench   --library engine.json --ckpt engine.pt
+
+lamb-verify engine.json "1234+4321"                                 # no torch, no GPU
+lamb-verify engine.json --check "(12+7)-(30-4)" "[[0,1,2],[1,3,4],[1,9,10]]" -7
+```
+
+Measured (depths 1-3, + and -, 2-digit training): the core reaches held-out 1.000 at every depth
+by step 250; it compiles to 138 structures, none failing the fresh-operand check; the compiled
+library answers 600 held-out problems at 1.000 in **0.022 ms** each in pure Python, against
+2.9 ms for the neural core, and answers operands far wider than it was trained on (`1234+4321`)
+because a compiled program is operand-invariant. Checkpoint 537 KB, library 22 KB.
+
+`lamb/progexec.py` imports nothing but the standard library: parse, look up, execute exactly with
+`Fraction`, and `verify(expr, program, claimed)`, which accepts only if the program runs, matches
+the claim, and the claim is the expression's exact value. Producing a program needs the network;
+checking one costs one straight-line execution. Unsupported structures are refused, never guessed.
+Scope: balanced arithmetic trees at the trained depths and operators.
+
 ## Running things
 
 ```bash
+lamb-engine --help                     # train / compile / solve / bench (above)
 python -m lamb.train                   # self-play arithmetic trainer
 python -m lamb.lotus                   # parallel supervised latent block
 python -m lamb.coconut                 # sequential continuous thought (Stage A original)

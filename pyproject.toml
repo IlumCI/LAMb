@@ -45,6 +45,8 @@ lamb-comm = "lamb.comm:main"
 lamb-comm-transfer = "lamb.comm_transfer:main"
 lamb-comm-pop = "lamb.comm_pop:main"
 lamb-bridge = "lamb.bridge_train:main"
+lamb-engine = "lamb.engine:main"
+lamb-verify = "lamb.progexec:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lamb"]
