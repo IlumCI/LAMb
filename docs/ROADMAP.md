@@ -2259,6 +2259,16 @@ programs each) while the nested key `(op, left, right)` gave 200 keys with zero 
 fidelity 1.000. The fix matters because real problems are not balanced trees, so the general
 self-copy needs a structural key -- `op_pattern` in `lamb/selfcompile.py` is now that.
 
+**It holds for division.** With the rational register file (`+ - * /`, fractions decoded as
+numerator/denominator), 1-digit operands: a depth-1 core compiles to 4 programs and a depth-2 core
+to 64 (= 4^3), one program per structure, coverage 1.000, fidelity 1.000, compiled accuracy 1.000,
+no refusals. The exact self-copy is not an artefact of integer `+/-`. One cost finding came with it:
+the default `RATIONAL_MODULI` pad ten moduli to width 271, which made a rational training step 5.1 s
+against 0.16 s for integer -- 32x, the padding trade `CLAUDE.md` warns about, here on the losing side.
+A ring sized to the task (`(16, 25, 27, 11, 7, 13, 37)`, product 4.4e7, against a worst unreduced
+magnitude of 9^4 = 6561 at depth 2) gives 0.38 s/step with no rows dropped out of range. Size the
+rational ring to the workload, as GSM8K_MODULI already does, rather than defaulting to the widest.
+
 **Multi-agent decomposition, measured.** `solve_hierarchical` (`lamb/selfcompile.py`) solves
 a task deeper than any single copy using only cheaper copies: a subtree within a copy's
 depth is solved by that copy, and two sub-results are combined by a *depth-1 copy* solving
