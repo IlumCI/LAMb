@@ -2433,6 +2433,73 @@ core, which it correctly refuses; (iii) the core's scope (depth <= 3) is given t
 discovered; (iv) this workload uses its whole structure space, so "compile only what you need" is
 not tested against a workload that needs a subset, where it should matter more.
 
+**Phase D, pre-registered: the model discovers its core's reach, and the compile rule is
+learned.** Two of Phase C's holes, closed together because they are one mechanism. The compiler
+is no longer told its core handles depth <= 3: any work no copy takes is a candidate, at any
+depth, and the core's reach is found out by trying (an instance the core cannot even load counts
+as a failed attempt at full cost -- no free peek at its architecture). To make reach non-trivial,
+the core is trained on *balanced* depth-3 trees only; whether it can back unbalanced depth-3 trees,
+or skinny depth-4 trees that fit its register file, is for the model to find out. The fixed rule's
+two baked-in assumptions -- every compile succeeds; a copy is worth it once past history alone paid
+for it -- are replaced by learned predictions on the routing core's own representation of the
+structure: a *reach head* (will my core back this? cross-entropy on its own verified attempt
+outcomes, generalising to structures never tried) and a *rate head* (how often will this recur?
+Poisson likelihood on logged occurrences). It attempts when p_backed x rate x calls_saved x
+rounds_remaining > check cost, with a 5% exploration chance. Stated in advance: the decision's form
+is expected value and the horizon is known; what is learned is its inputs. Arms on the same stream
+per seed: fixed rule told its reach (Phase C), fixed rule told nothing ("blind"), learned rule told
+nothing, and an oracle-reach reference in which failed attempts are free. Five seeds.
+*Amended before the learned arm ran, under shared-machine limits: three seeds, 150 rounds, the
+oracle arm dropped. One partial result was seen before amending -- seed 0's blind arm at 200
+rounds (191 adopted: 128 depth-3 and 63 depth-4; 657 forwards wasted).*
+
+> 1. Reach discovery: on structures it never attempted, the learned reach head separates what the
+>    core backs from what it does not with AUC >= 0.9 (truth from an uncharged offline check).
+> 2. Waste: the learned rule spends fewer core forwards on failed attempts than the blind fixed
+>    rule, on every seed.
+> 3. Cost: the learned rule's total cost is below the blind fixed rule's on every seed.
+> 4. Executed accuracy 1.000 throughout; every adopted copy passes self-verification.
+
+**Phase D, measured: discovery by trying works; a learned model of reach does not; the learned
+rule's gain is small.** Three seeds, 150 rounds of 32 depth<=5 tasks, balanced-only depth-3 core
+(accuracy 1.000), same stream per seed across arms:
+
+| arm | total cost/task | forwards wasted on failed attempts | copies adopted | reach-head AUC, untried structures |
+| --- | --- | --- | --- | --- |
+| fixed rule, told reach | 6.64 / 6.65 / 6.50 | 192 | 128 depth-3 | -- |
+| fixed rule, blind | 6.94 / 7.03 / 6.78 | 435 / 492 / 432 | 128 depth-3 + 34-39 depth-4 | -- |
+| learned rule, blind | 6.60 / 6.96 / 6.67 | 405 / 423 / 396 | 127-128 depth-3 + 30-32 depth-4 | 0.608 / 0.911 / 0.415 |
+
+Criterion 1 **fails**: the reach head reaches AUC >= 0.9 on unattempted structures on one seed of
+three, and is below chance on another. The model does not learn a generalising model of what its
+core can back. Criteria 2 and 3 pass, narrowly: on every seed the learned rule wastes 7-14% fewer
+forwards and costs 0.07-0.34 per task less than the blind fixed rule -- but with the reach head not
+generalising, the saving plausibly comes from the rate/horizon side (attempting less overall, not
+attempting what will fail), which this design does not separate. Criterion 4 passes: accuracy 1.000
+in every arm, every adopted copy verified, and this time the rejection path ran in earnest (64
+unbalanced depth-3 structures refused in the told arm; 132-164 refusals in the blind arms).
+
+The finding worth keeping is what trying discovered. A core trained only on balanced depth-3 trees
+backs 30-39 *depth-4* structures that nobody specified: skinny trees small enough for its register
+file whose +/- pattern makes them algebraically equal to a balanced program, found only by attempting
+them and checking the core's program against values the model had already computed through its own
+copies. It also correctly finds that it cannot back unbalanced depth-3 trees. So the model's reach is
+not its training distribution, and only experience reveals it. But in this stream finding that reach
+costs more than it saves -- the depth-4 structures are rare, mostly one-off keys -- so being *told*
+the reach is still cheapest, and the blind arms pay for their discoveries.
+
+Holes, stated plainly. (i) The reach head reads the *routing* core's representation, which is trained
+to route, not to encode whether a sign pattern is associative-equivalent to a balanced program; a
+reach model probably needs its own features or the compile outcomes fed back into that core. (ii)
+Copies backed by algebraic equivalence are verified on three instances: for +/- programs, which are
+linear with integer coefficients, agreement on three random 2-digit points makes a wrong program very
+unlikely but is not a proof (the same holds for every copy compiled so far). (iii) Three seeds and 150
+rounds, reduced from the pre-registered five on a shared machine; the amendment is recorded above.
+(iv) The decision's form is expected value; only its inputs were learned, and only one of them (rate)
+plausibly did anything. An engineering note: the learned compiler first re-featurised every structure
+it had ever logged each round, so cost and memory grew with the log (~1.9 GB per process, slowing);
+it now trains each round on tried and candidate structures plus a capped sample of the rest.
+
 The holes to watch, from the same scars as everywhere else: an uncovered structure must be
 reported, never silently run on the core (a copy that falls back to the original is not a
 copy); the dispatch op's executor must be exact or it breaks the 1:1 property; and whether

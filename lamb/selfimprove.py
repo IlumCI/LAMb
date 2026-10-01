@@ -85,72 +85,214 @@ def ideal_calls(root: Node, max_depth: int) -> int:
 class CoreCompiler:
     """Decides, from logged experience, when to compile a copy from the core, and checks it.
 
-    The copy it grows is registered at ``copies[depth]`` and starts empty, so it refuses
+    Core-backed copies are created per depth as needed and registered at ``copies[depth]``
+    (never replacing a copy that already exists there); each starts empty and refuses
     everything until something is compiled into it. ``forwards`` counts core forward passes
-    spent compiling, the cost side of the trigger.
+    spent compiling, the cost side of every decision.
+
+    ``told_reach=True`` (the default, and how Phase C ran): only work of exactly the core's
+    depth is considered -- the model is *told* its core's reach. ``False`` tells it nothing:
+    any work no copy takes is a candidate, and the reach has to be found out by trying. An instance the core
+    cannot even load (more operands or instructions than its machine holds) is a failed
+    attempt at full cost, the same as one it loads and gets wrong -- the compiler does not
+    get to consult the core's architecture for free. ``charge_rejections=False`` makes
+    failed attempts free, i.e. perfect foreknowledge of reach: a reference, not a policy.
     """
 
     def __init__(self, core, copies: Dict[int, CompiledModel], k: int = 3,
-                 forward_cost: float = 4.0):
+                 forward_cost: float = 4.0, told_reach: bool = True,
+                 charge_rejections: bool = True):
         self.core = core
         self.copies = copies
         self.k = k
         self.forward_cost = forward_cost
         self.depth = int(core.cfg.depth)
-        self.copy = CompiledModel(
-            library={}, n_operands=core.n_operands, n_instr=core.n_instr,
-            out_reg=core.n_operands + core.n_instr - 1, machine=core.machine,
-            prepare=core._prepare, depth=self.depth)
-        copies[self.depth] = self.copy
+        self.scope: Optional[int] = self.depth if told_reach else None
+        self.charge_rejections = charge_rejections
+        self.own: Dict[int, CompiledModel] = {}
+        self.copy = self._copy_for(self.depth)             # the copy Phase C grows
         self.count: Dict[tuple, int] = {}
         self.saving: Dict[tuple, int] = {}
         self.buffer: Dict[tuple, List[Tuple[str, object]]] = {}
+        self.depth_of: Dict[tuple, int] = {}
+        self.first_seen: Dict[tuple, int] = {}
         self.rejected: set = set()
         self.forwards = 0
+        self.wasted = 0
         self.adopted = 0
+        self.now = 0
+
+    def _copy_for(self, depth: int) -> CompiledModel:
+        if depth not in self.own:
+            c = CompiledModel(
+                library={}, n_operands=self.core.n_operands, n_instr=self.core.n_instr,
+                out_reg=self.core.n_operands + self.core.n_instr - 1,
+                machine=self.core.machine, prepare=self.core._prepare, depth=depth)
+            self.own[depth] = c
+            self.copies.setdefault(depth, c)
+        return self.own[depth]
+
+    def compiled(self, key) -> bool:
+        return any(key in c.library for c in self.own.values())
 
     def observe(self, split_nodes: Sequence[Node]) -> None:
-        """Log subtrees the model had to split but its core could have done in one shot."""
+        """Log work the model did the slow way that no copy takes."""
         slow = effective(lambda _: True, self.copies)       # its trusted slow path
         for n in split_nodes:
             t = n.tree()
-            if tree_depth(t) != self.depth:
+            d = tree_depth(t)
+            if (self.scope is not None and d != self.scope) or \
+                    covering_depth(n, self.copies) is not None:
                 continue
             key = op_pattern(t)
-            if key in self.copy.library or key in self.rejected:
+            if self.compiled(key) or key in self.rejected:
                 continue
             self.count[key] = self.count.get(key, 0) + 1
+            self.depth_of[key] = d
+            self.first_seen.setdefault(key, self.now)
             buf = self.buffer.setdefault(key, [])
             if len(buf) < self.k:
                 val, calls = execute_dispatch_program(emit_program(n, slow), self.copies)
                 self.saving.setdefault(key, calls - 1)
                 buf.append((tree_to_expr(t), val))
 
+    def _loadable(self, expr: str) -> bool:
+        from .alu import parse_expr
+        from .regmachine import gold_program, operands
+
+        t = parse_expr(expr)
+        return (len(operands(t)) + self.core.n_const <= self.core.n_operands
+                and len(gold_program(t, ops=self.core.machine.ops)[0]) <= self.core.n_instr)
+
     @torch.no_grad()
-    def maybe_compile(self) -> List[Tuple[tuple, str]]:
-        """Compile every key whose logged history pays for its check; verify before adopting."""
-        events = []
-        for key, seen in list(self.count.items()):
-            if key in self.copy.library or key in self.rejected:
-                continue
-            buf = self.buffer.get(key, [])
-            if len(buf) < self.k or seen * self.saving[key] < self.k * self.forward_cost:
-                continue
+    def attempt(self, key) -> str:
+        """Run the core on the logged instances; adopt only a consistent, correct program."""
+        buf = self.buffer[key]
+        cost = len(buf)
+        ok = False
+        if all(self._loadable(e) for e, _ in buf):
             tasks = [(e, "0", []) for e, _ in buf]
             progs, vals, _, _ = _argmax_programs(self.core, tasks)
-            self.forwards += len(tasks)
-            consistent = all(p == progs[0] for p in progs)
             regs = run_program(self.core.machine, vals, [progs[0]] * len(tasks),
                                str(self.core.device))
             got = self.copy._decode(regs, self.copy.out_reg)
-            agrees = all(g == v for g, (_, v) in zip(got, buf))
-            if consistent and agrees:
-                self.copy.library[key] = progs[0]
-                self.adopted += 1
-                events.append((key, "adopted"))
-            else:
-                self.rejected.add(key)
-                events.append((key, "rejected"))
+            ok = (all(p == progs[0] for p in progs)
+                  and all(g == v for g, (_, v) in zip(got, buf)))
+        if ok:
+            self.forwards += cost
+            self._copy_for(self.depth_of[key]).library[key] = progs[0]
+            self.adopted += 1
+            return "adopted"
+        if self.charge_rejections:
+            self.forwards += cost
+            self.wasted += cost
+        self.rejected.add(key)
+        return "rejected"
+
+    def candidates(self) -> List[tuple]:
+        return [k for k in self.count if not self.compiled(k) and k not in self.rejected
+                and len(self.buffer.get(k, [])) >= self.k]
+
+    def maybe_compile(self, now: int = 0, total: int = 0) -> List[Tuple[tuple, str]]:
+        """The fixed rule: compile once the logged history alone pays for the check."""
+        self.now = now
+        return [(key, self.attempt(key)) for key in self.candidates()
+                if self.count[key] * self.saving[key] >= self.k * self.forward_cost]
+
+
+class LearnedCompiler(CoreCompiler):
+    """The compile decision from learned predictions instead of fixed assumptions.
+
+    The fixed rule assumes every compile succeeds and waits until past history alone pays
+    for the check. Here both are predicted from the model's own representation of the
+    structure (``featurize``: the routing core's state for the subtree, detached):
+
+    * a **reach head** -- will my core back this? -- trained by cross-entropy on the
+      verified outcome of every attempt it has made, generalising to structures never tried;
+    * a **rate head** -- how often will this recur per round? -- trained by Poisson
+      likelihood on the occurrences it has logged, with each key's exposure since first seen.
+
+    It attempts when ``p_backed * rate * saving * rounds_remaining > k * forward_cost``, plus
+    an ``explore`` chance of trying a candidate the prediction rejects so the reach head keeps
+    getting evidence. The form is expected value; the inputs are learned. The horizon
+    (rounds remaining) is a known operational quantity, not learned.
+    """
+
+    def __init__(self, core, copies, featurize, feat_dim: int, k: int = 3,
+                 forward_cost: float = 4.0, explore: float = 0.05, lr: float = 3e-3,
+                 fit_sample: int = 256, seed: int = 0):
+        super().__init__(core, copies, k=k, forward_cost=forward_cost, told_reach=False)
+        import torch.nn as nn
+
+        self.featurize = featurize
+        self.explore = explore
+        self.fit_sample = fit_sample
+        self.rng = random.Random(seed)
+        self.reach = nn.Sequential(nn.Linear(feat_dim, 64), nn.GELU(), nn.Linear(64, 1))
+        self.rate = nn.Sequential(nn.Linear(feat_dim, 64), nn.GELU(), nn.Linear(64, 1))
+        self.opt = torch.optim.Adam(list(self.reach.parameters())
+                                    + list(self.rate.parameters()), lr=lr)
+        self.outcome: Dict[tuple, float] = {}
+        self.example: Dict[tuple, str] = {}
+
+    def observe(self, split_nodes: Sequence[Node]) -> None:
+        super().observe(split_nodes)
+        for key, buf in self.buffer.items():
+            if buf:
+                self.example.setdefault(key, buf[0][0])
+
+    def _fit(self, keys: List[tuple], feats: torch.Tensor, steps: int = 3) -> None:
+        idx = {k: i for i, k in enumerate(keys)}
+        exposure = torch.tensor([max(1, self.now - self.first_seen[k] + 1) for k in keys],
+                                dtype=torch.float32)
+        counts = torch.tensor([float(self.count.get(k, 0)) for k in keys])
+        tried = [k for k in keys if k in self.outcome]
+        for _ in range(steps):
+            log_rate = self.rate(feats).squeeze(-1)
+            mu = torch.exp(log_rate) * exposure
+            loss = (mu - counts * torch.log(mu.clamp_min(1e-8))).mean()
+            if tried:
+                ti = torch.tensor([idx[k] for k in tried])
+                y = torch.tensor([self.outcome[k] for k in tried])
+                loss = loss + F.binary_cross_entropy_with_logits(
+                    self.reach(feats[ti]).squeeze(-1), y)
+            self.opt.zero_grad(set_to_none=True)
+            loss.backward()
+            self.opt.step()
+
+    def predict(self, keys: List[tuple]) -> Tuple[torch.Tensor, torch.Tensor]:
+        feats = self.featurize([self.example[k] for k in keys]).detach()
+        with torch.no_grad():
+            p = torch.sigmoid(self.reach(feats).squeeze(-1))
+            rate = torch.exp(self.rate(feats).squeeze(-1))
+        return p, rate
+
+    def maybe_compile(self, now: int = 0, total: int = 0) -> List[Tuple[tuple, str]]:
+        self.now = now
+        cands = self.candidates()
+        # Train on what matters each round -- every tried key (reach), every candidate, and a
+        # capped random sample of the rest (rate). Re-featurising every key ever logged made
+        # the cost and memory grow with the log (measured: ~1.9 GB and slowing, when blind
+        # logging admits thousands of one-off deep structures).
+        keys = [k for k in self.count if k in self.example]
+        if not keys:
+            return []
+        must = [k for k in keys if k in self.outcome or k in set(cands)]
+        rest = [k for k in keys if k not in self.outcome and k not in set(cands)]
+        keys = must + self.rng.sample(rest, min(len(rest), self.fit_sample))
+        feats = self.featurize([self.example[k] for k in keys]).detach()
+        self._fit(keys, feats)
+        if not cands:
+            return []
+        p, rate = self.predict(cands)
+        remaining = max(0, total - now)
+        events = []
+        for key, pk, rk in zip(cands, p.tolist(), rate.tolist()):
+            ev = pk * rk * self.saving[key] * remaining - self.k * self.forward_cost
+            if ev > 0 or self.rng.random() < self.explore:
+                status = self.attempt(key)
+                self.outcome[key] = 1.0 if status == "adopted" else 0.0
+                events.append((key, status))
         return events
 
 
@@ -182,6 +324,18 @@ class SelfImprovingAgent:
         self._seed = seed * 1_000_003 + 17
         self.stream_calls = 0
         self.stream_tasks = 0
+        self.rounds_done = 0
+        self.total_rounds = 0           # set by the caller: the known length of the work
+
+    @torch.no_grad()
+    def featurize(self, exprs: List[str]) -> torch.Tensor:
+        """The routing core's own state for a standalone subtree: ``[h_end, h_start]`` of its
+        root, the same readout the dispatch head uses. Handed to a learned compiler so its
+        predictions are about the model's representation, not hand-built features."""
+        self.policy.eval()
+        h = self.policy.hidden(exprs, self.device)
+        ends = torch.tensor([len(e) for e in exprs])            # +1 BOS, -1 last char
+        return torch.cat([h[torch.arange(len(exprs)), ends], h[:, 1]], dim=-1).cpu()
 
     def _batch(self, n: int) -> List[str]:
         out = []
@@ -220,9 +374,10 @@ class SelfImprovingAgent:
         events = []
         if self.compiler is not None:
             self.compiler.observe(splits_all)
-            events = self.compiler.maybe_compile()
+            events = self.compiler.maybe_compile(self.rounds_done, self.total_rounds)
         self.stream_calls += calls
         self.stream_tasks += len(exprs)
+        self.rounds_done += 1
         return {"calls": calls / len(exprs),
                 "adopted": float(sum(1 for _, s in events if s == "adopted")),
                 "rejected": float(sum(1 for _, s in events if s == "rejected"))}
@@ -255,7 +410,7 @@ class SelfImprovingAgent:
                                       is not None, self.copies)[0]
             ideal += ideal_calls(root, self.core_depth)
             for nd in internal_nodes(root):
-                if tree_depth(nd.tree()) == self.core_depth and covering_depth(nd, self.copies):
+                if tree_depth(nd.tree()) >= 3 and covering_depth(nd, self.copies):
                     d3_tot += 1
                     d3_hit += decide(nd)
         return {"calls": calls / n, "accuracy": correct / n, "best_now": best / n,

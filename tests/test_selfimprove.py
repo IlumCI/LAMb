@@ -91,3 +91,25 @@ def test_self_verification_refuses_a_copy_the_core_cannot_back(setup):
     assert events, "the trigger should have fired on recurring keys"
     assert comp.adopted == 0 and len(comp.copy.library) == 0
     assert comp.forwards > 0                            # the checks were paid for
+
+
+def test_blind_compiler_considers_any_depth_and_learned_one_runs():
+    # told_reach=False: work of any depth no copy takes is a candidate (Phase D); the learned
+    # compiler trains its heads on that log and takes a finite decision without crashing.
+    from lamb.selfimprove import LearnedCompiler
+
+    copies = build_gold_copies([(1, 0), (2, 0)], n=800)
+    core = _core()
+    blind = CoreCompiler(core, dict(copies), told_reach=False)
+    feat = lambda exprs: torch.randn(len(exprs), 8)
+    learned = LearnedCompiler(core, dict(copies), feat, feat_dim=8, explore=1.0)
+    depths = set()
+    for e, _ in _tasks(40, 5):
+        _, _, splits = run_with_fallback(parse_nodes(e), lambda n: False, copies)
+        blind.observe(splits)
+        learned.observe(splits)
+    depths = set(blind.depth_of.values())
+    assert max(depths) >= 4, "blind logging must admit work deeper than the core's own depth"
+    events = learned.maybe_compile(now=1, total=10)
+    assert events and all(s in ("adopted", "rejected") for _, s in events)
+    assert learned.forwards > 0
