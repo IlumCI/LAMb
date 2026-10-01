@@ -2146,6 +2146,65 @@ operand-invariant when the core is competent, which is the property 3g turns int
 1:1 self-copy. The supervised core reaches that competence today, so 3g does not wait on
 3e.
 
+### 3e-ii. Pre-registered: expert iteration instead of policy gradient
+
+The dispatch work (3g) found that REINFORCE on accept/refuse failed where the *same observations
+used as cross-entropy targets* succeeded. The same move applies to programs: sample programs, keep
+one whose executed answer equals the problem's answer, and train on it with cross-entropy -- the
+supervised path the register machine already solves at 1.000 -- plus a per-depth replay buffer of
+found programs (STaR arXiv:2203.14465, RFT arXiv:2308.01825, ReST arXiv:2308.08998). Nothing gold:
+no gold program, no gold intermediate trace (``process_coef=0``), only the final answer. Same
+machine, curriculum bandit and exploration as 3e-i (2-digit, depths 1-3, ``d_model=64``), with the
+GRPO arm run on the identical configuration as the control.
+
+> Outcome-only expert iteration reaches held-out ``answer_acc_hard >= 0.95`` at depth 3 on both of
+> two seeds within 1500 steps. The GRPO control on the same configuration is reported beside it.
+
+*Confirmation, pre-registered after the first result (below) and before running it:* the revised
+method -- expert iteration plus the fresh-operand check plus self-composition, both designed after
+seeing plain RFT fail -- is re-run on three fresh seeds (2, 3, 4), 1000 steps, same configuration.
+Criterion: held-out ``answer_acc_hard >= 0.95`` at depth 3 on all three.
+
+**Results: the pre-registered method fails, its revision passes the confirmation, and outcome-only
+induction now reaches depth 3.** Same configuration throughout (2-digit, depths 1-3, ``d_model=64``,
+1500 steps unless noted); held-out ``answer_acc_hard`` by depth:
+
+| arm | depth 1 | depth 2 | depth 3 |
+| --- | --- | --- | --- |
+| GRPO control | 0.594 | 0.000 | 0.008 |
+| plain RFT (the pre-registered method), 2 seeds | 1.000 / 1.000 | 0.203 / 0.008 | 0.000 / 0.000 |
+| + fresh-operand check, most-probable verified sample | 1.000 / 1.000 | 0.891 / 1.000 | 0.000 / 0.000 |
+| + self-composition, development seeds 0-1 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| + self-composition, **confirmation seeds 2-4**, 1000 steps | 1.000 x3 | 1.000 x3 | **1.000 x3** |
+
+The pre-registered criterion for plain RFT is **not met**: zero at depth 3 on both seeds. But it
+answers the 3e-i question outright. GRPO stuck at 0.594 on depth 1 in this machine; the *same*
+samples used as cross-entropy targets reach 1.000. The "register-file ceiling" of 3e-i was the
+policy-gradient estimator, not the register file -- the same lesson as dispatch (3g), where REINFORCE
+on accept/refuse failed and the identical observations as targets worked.
+
+Two further failures, each diagnosed and fixed without introducing anything gold. *Coincidences*: at
+depth 2 a buffer of 1538 "verified" programs left accuracy at 0.20, because a wrong program can hit one
+instance's answer (``a-b+c = a+b-c`` whenever ``b = c``). A real program is operand-invariant, so each
+found program is re-run on its own problem with fresh operands; 70-130 coincidental programs per run
+were rejected, and keeping the model's *most probable* verified sample (so one mode per structure, not a
+splice of several) lifted depth 2 to 0.89-1.00. *Exploration*: depth 3 still found zero verified programs
+in 1500 steps -- a 7-instruction program does not turn up by sampling. *Self-composition* writes one
+instead: a depth-d problem is two depth-(d-1) problems and one operator, so the model runs itself on the
+two halves, stitches its own programs into the full register layout (right half's pointers shifted), adds
+the combining instruction, and verifies the candidate like any sample (answer, then fresh operands).
+~6900-7200 composed programs per run passed; the core, trained on them, then emits the whole depth-3
+program directly, which is what the held-out number measures. The structure comes from the input (as in
+dispatch), the halves are the model's own programs, the check is the answer -- no gold program, no gold
+trace. These two fixes were designed after seeing the failures, which is why the confirmation on three
+fresh seeds was pre-registered before running; it passes on all three.
+
+Against the project's history: outcome-only induction was 0.015 at depth 3 in 3a-xii, the sixth
+retraction. With expert iteration, a fresh-operand check and self-composition it is 1.000 on five of five
+seeds. What this does *not* show: depth beyond 3 (the machine here is sized for 3; composition is the
+obvious way up), unbalanced trees, operators beyond + and -, or anything with language. Self-composition
+needs the problem's structure, which arithmetic hands over in the input and prose does not.
+
 ## 3f. Verified self-distillation into a smaller student (lossy; a fallback)
 
 Correction of framing, recorded because the distinction is the point. Distillation

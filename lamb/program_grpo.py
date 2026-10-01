@@ -142,6 +142,8 @@ class GRPOTrainer:
                  entropy_anneal: Optional[int] = None,
                  explore_eps: float = 0.3, explore_eps_min: float = 0.02,
                  explore_anneal: Optional[int] = 400, calib_coef: float = 0.0,
+                 mode: str = "grpo", replay: int = 4000, rft_verify: bool = True,
+                 compose: bool = False,
                  bandit: bool = True, bandit_ema: float = 0.85,
                  bandit_temp: float = 0.1, bandit_eps: float = 0.15,
                  rational: bool = False, digits: Optional[int] = None,
@@ -177,6 +179,16 @@ class GRPOTrainer:
         self.explore_eps_min = float(explore_eps_min)
         self.explore_anneal = int(explore_anneal) if explore_anneal else 0
         self.calib_coef = float(calib_coef)
+        if mode not in ("grpo", "rft"):
+            raise ValueError(f"unknown mode {mode!r}")
+        self.mode = mode
+        self.replay = int(replay)
+        self.buffer: Dict[int, list] = {d: [] for d in depths}
+        self._replay_rng = random.Random(seed + 1)
+        self.rft_verify = rft_verify
+        self._coincidences = 0
+        self.compose = compose
+        self._composed = 0
         self.digits = cfg.digits if digits is None else int(digits)
         self.ops_key = cfg.ops_key if ops_key is None else int(ops_key)
         self.grammar = TaskGrammar()
@@ -274,6 +286,180 @@ class GRPOTrainer:
             tot = tot + (-(lp.exp() * lp).sum(-1)).mean()
         return tot / 3.0
 
+    def _program_ce(self, logits, progs, n_used: int) -> torch.Tensor:
+        """Cross-entropy of the core's heads against given programs, first ``n_used``
+        instructions only. Pointers in a sampled program were drawn from the legal set, so
+        no target ever lands on a masked (-inf) slot."""
+        dev = logits[0].device
+        total = torch.zeros((), device=dev)
+        for k, lg in enumerate(logits):                      # op, ptr-a, ptr-b
+            tgt = torch.tensor([[p[t][k] for t in range(n_used)] for p in progs], device=dev)
+            lp = torch.log_softmax(lg[:, :n_used], dim=-1)
+            total = total - lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1).mean()
+        return total / 3.0
+
+    def stitch(self, left, right, root_op: str, depth: int) -> list:
+        """Join two depth-(d-1) programs into one depth-d program in the full layout.
+
+        Left half as-is; the right half's operand pointers move past the left's leaves and
+        its result pointers past the left's instructions (the constant register stays put);
+        then one instruction combines the two halves' last results with ``root_op``.
+        """
+        k, n_op = self.rmt.n_const, self.n_operands
+        c_instr, c_leaves = 2 ** (depth - 1) - 1, 2 ** (depth - 1)
+
+        def shifted(ptr):
+            if ptr < k:
+                return ptr                                  # the constant register
+            if ptr < n_op:
+                return ptr + c_leaves                       # operand of the right half
+            return ptr + c_instr                            # result of the right half
+
+        prog = [tuple(ins) for ins in left[:c_instr]]
+        prog += [(o, shifted(a), shifted(b)) for o, a, b in right[:c_instr]]
+        prog.append((self.machine.ops.index(root_op), n_op + c_instr - 1,
+                     n_op + 2 * c_instr - 1))
+        while len(prog) < self.n_instr:
+            prog.append((0, 0, 0))
+        return prog
+
+    @torch.no_grad()
+    def _compose(self, tasks, hits, depth: int):
+        """Write a candidate depth-d program from the model's own depth-(d-1) programs.
+
+        Sampling a 7-instruction program blind did not find a single verified depth-3
+        program in 1500 steps, though the model was solid at depth 2. A balanced depth-d
+        tree is two depth-(d-1) trees joined by one operator, so for each problem still
+        without a hit the model is run on its own two halves, and their argmax programs are
+        stitched into the full layout -- left half as-is, right half's operand pointers
+        shifted past the left's leaves and its result pointers past the left's
+        instructions -- plus one instruction combining the two halves' outputs with the
+        root operator read from the input. The candidate is then verified like any sample
+        (answer, then fresh operands), so a wrong half produces a rejected candidate, not
+        a training target. Nothing gold: the structure is the input's, the halves are the
+        model's own, the check is the answer. What the core then has to learn is to emit
+        the whole program *directly*, which is what held-out evaluation measures.
+        """
+        from .alu import parse_expr
+        from .selfcompile import tree_to_expr
+
+        need = [i for i, h in enumerate(hits) if h is None]
+        if not need:
+            return hits
+        trees = [parse_expr(tasks[i][0]) for i in need]
+        halves = []
+        for t in trees:
+            halves += [(tree_to_expr(t[1]), "0", []), (tree_to_expr(t[2]), "0", [])]
+        self.rmt._prepare(halves)
+        lh = self.rmt._latents(halves)
+        cnt = torch.tensor(self.rmt._counts, device=self.device)
+        op_l, a_l, b_l = self.machine.logits(lh, cnt)
+        oi, ai, bi = op_l.argmax(-1), a_l.argmax(-1), b_l.argmax(-1)
+        c_instr = 2 ** (depth - 1) - 1
+        out = list(hits)
+        for j, (i, t) in enumerate(zip(need, trees)):
+            halves_prog = [[(int(oi[r, st]), int(ai[r, st]), int(bi[r, st]))
+                            for st in range(c_instr)] for r in (2 * j, 2 * j + 1)]
+            out[i] = self.stitch(halves_prog[0], halves_prog[1], t[0], depth)
+        # Compose proposals are candidates, so check the answer here; _generalises then
+        # checks fresh operands.
+        _, _, vals, answers, keep = self.rmt._prepare(tasks)
+        cand = [i for i in need if out[i] is not None]
+        if cand:
+            correct, _ = self._reward([vals[i] for i in cand], [out[i] for i in cand],
+                                      [answers[i] for i in cand],
+                                      [tasks[i][2] for i in cand], self._out_reg(depth))
+            for c, i in zip(correct.tolist(), cand):
+                if c < 1.0 or not keep[i]:
+                    out[i] = None
+                else:
+                    self._composed += 1
+        return out
+
+    @torch.no_grad()
+    def _generalises(self, tasks, hits, out_reg: int, n_variants: int = 2):
+        """Drop verified programs that were only right by coincidence.
+
+        A wrong program can still hit the answer on one instance (``a-b+c`` equals
+        ``a+b-c`` whenever ``b == c``), and those poison expert iteration: measured, a
+        depth-2 buffer of 1538 "verified" programs left held-out depth-2 accuracy at 0.20.
+        A real program is operand-invariant -- the property that makes self-compilation
+        exact -- so it must also be right on the same structure with fresh operands. Each
+        found program is run on ``n_variants`` re-drawn instances of its own problem, whose
+        answers come from the environment exactly as the original's did. Still outcome-only:
+        no gold program, no gold trace.
+        """
+        from .alu import parse_expr
+        from .selfcompile import tree_to_expr
+        from ._native import evaluate
+
+        rng = self._replay_rng
+
+        def redraw(t):
+            if isinstance(t[1], int):
+                return (t[0], self.grammar._num(self.digits, rng),
+                        self.grammar._num(self.digits, rng))
+            return (t[0], redraw(t[1]), redraw(t[2]))
+
+        var_tasks, var_progs, owner = [], [], []
+        for i, h in enumerate(hits):
+            if h is None:
+                continue
+            tree = parse_expr(tasks[i][0])
+            for _ in range(n_variants):
+                e = tree_to_expr(redraw(tree))
+                a = evaluate(e)
+                if a is not None:
+                    var_tasks.append((e, str(a), []))
+                    var_progs.append(h)
+                    owner.append(i)
+        if not var_tasks:
+            return hits
+        _, _, vals, answers, keep = self.rmt._prepare(var_tasks)
+        correct, _ = self._reward(vals, var_progs, answers, [t[2] for t in var_tasks],
+                                  out_reg)
+        bad = {owner[k] for k in range(len(owner))
+               if float(correct[k]) < 1.0 or not keep[k]}
+        self._coincidences += len(bad)
+        return [None if i in bad else h for i, h in enumerate(hits)]
+
+    def _rft_loss(self, tasks, hits, depth: int, logits, n_used: int) -> torch.Tensor:
+        """Expert iteration: train on programs the model found that verifiably work.
+
+        REINFORCE on these programs failed to consolidate (3e-i); the dispatch work found
+        the same pattern, where policy gradient on accept/refuse failed and the identical
+        observations as cross-entropy targets succeeded. So a sampled program whose
+        executed answer equals the problem's answer becomes a supervised target -- the
+        supervised path the register machine already solves at 1.000 -- with nothing gold
+        in it: no gold program, no gold intermediate trace, only the final answer. Found
+        programs also enter a per-depth replay buffer (STaR/ReST-style), and each step
+        trains on a replayed batch too, so a rare find is not used once and forgotten.
+        """
+        rows = [i for i, h in enumerate(hits) if h is not None]
+        buf = self.buffer[depth]
+        for i in rows:
+            buf.append((tasks[i], hits[i]))
+        del buf[:max(0, len(buf) - self.replay)]
+        parts = []
+        if rows:
+            sel = [lg[rows] for lg in logits]
+            parts.append(self._program_ce(sel, [hits[i] for i in rows], n_used))
+        if buf:
+            k = min(len(buf), self.cfg.batch_size)
+            picks = [buf[j] for j in self._replay_rng.sample(range(len(buf)), k)]
+            r_tasks = [t for t, _ in picks]
+            self.rmt._prepare(r_tasks)
+            lh = self.rmt._latents(r_tasks)
+            cnt = torch.tensor(self.rmt._counts, device=self.device)
+            r_logits = self.machine.logits(lh, cnt)
+            parts.append(self._program_ce(r_logits, [p for _, p in picks], n_used))
+        if not parts:
+            # A zero that stays in the graph. Not ``sum(logits) * 0``: the pointer logits
+            # carry -inf at masked registers, and -inf * 0 is nan (the trap this repo has
+            # hit before). The op logits are never masked.
+            return logits[0].sum() * 0.0
+        return sum(parts) / len(parts)
+
     def train_step(self, step: int) -> Dict[str, float]:
         self.rmt.inner.reasoner.train()
         self.machine.train()
@@ -328,6 +514,8 @@ class GRPOTrainer:
         # not exist.
         n_used = 2 ** depth - 1
         logps, rewards = [], []
+        hits: List[Optional[list]] = [None] * B
+        best_lp = [float("-inf")] * B
         for _ in range(G):
             idx = [torch.multinomial(mp.reshape(-1, mp.size(-1)), 1).view(mp.shape[:-1])
                    for mp in mixes]                               # each (B,I)
@@ -339,6 +527,13 @@ class GRPOTrainer:
             progs = [[(int(oi[i, t]), int(ai[i, t]), int(bi[i, t]))
                       for t in range(self.n_instr)] for i in range(B)]
             correct, process = self._reward(vals, progs, answers, traces, out_reg)
+            for i in range(B):
+                # Keep the *most probable* verified sample, not the first. A problem has
+                # several correct programs, and training on a mix of them lets the argmax
+                # splice instructions from different ones into a program that is none of
+                # them; preferring the model's own mode keeps one program per structure.
+                if keep[i] and float(correct[i]) >= 1.0 and float(lp[i].detach()) > best_lp[i]:
+                    hits[i], best_lp[i] = progs[i], float(lp[i].detach())
             logps.append(lp)
             rewards.append(correct + self.process_coef * process)
         logp = torch.stack(logps)                                 # (G,B)
@@ -375,6 +570,12 @@ class GRPOTrainer:
         if self.entropy_anneal:
             floor = self.entropy_floor * max(0.0, 1.0 - step / self.entropy_anneal)
         loss = pg + self.entropy_coef * torch.relu(floor - ent)
+        if self.mode == "rft":
+            if self.compose and depth >= 2:
+                hits = self._compose(tasks, hits, depth)
+            if self.rft_verify:
+                hits = self._generalises(tasks, hits, out_reg)
+            loss = self._rft_loss(tasks, hits, depth, (op_l, a_l, b_l), n_used)
 
         if self.calib_coef:
             # The Jev/RLCD borrow: train an emitted confidence toward the empirical

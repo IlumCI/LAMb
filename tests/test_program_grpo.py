@@ -21,6 +21,7 @@ from lamb.program_grpo import CurriculumBandit, GRPOTrainer
 def _trainer(**kw):
     torch.manual_seed(0)
     depths = kw.pop("depths", [1, 2])
+    mode = kw.pop("mode", "grpo")
     base = dict(steps=8, batch_size=16, n_latent=8, loops=3, depth=max(depths),
                 eval_tasks=16, trace_coef=0.0, alu_coef=0.0, use_boundaries=False,
                 switch_coef=0.0, device="cpu", alu_moduli=(16, 25, 27, 11, 37))
@@ -28,7 +29,7 @@ def _trainer(**kw):
     return GRPOTrainer(LotusConfig(**base), ArithmeticTokenizer(), depths=depths,
                        model_cfg=ModelConfig(d_model=48, n_heads=4, d_ff=96,
                                              recurrent_steps=3),
-                       group=6)
+                       group=6, mode=mode)
 
 
 def test_bandit_prefers_the_learnable_arm():
@@ -103,3 +104,40 @@ def test_curriculum_depth_must_match_machine():
 
     with pytest.raises(ValueError):
         _trainer(depths=[1, 2], depth=3)
+
+
+def test_stitching_two_correct_halves_gives_a_correct_whole_program():
+    # Self-composition (3e-ii): a depth-d program built from the depth-(d-1) programs of
+    # its two halves. Fed the halves' *gold* programs, the stitched program must execute to
+    # the whole problem's answer -- this pins the pointer remapping, which is where a
+    # composition goes silently wrong (an off-by-one reads a neighbouring register).
+    from fractions import Fraction
+
+    from lamb.alu import parse_expr
+    from lamb.regmachine import run_program
+    from lamb.selfcompile import tree_to_expr
+
+    tr = _trainer(depths=[1, 2, 3], n_latent=8, batch_size=8)
+    tasks = tr._sample_batch(3, 12)
+    for task in tasks:
+        tree = parse_expr(task[0])
+        halves = [(tree_to_expr(tree[1]), "0", []), (tree_to_expr(tree[2]), "0", [])]
+        _, golds, _, _, _ = tr.rmt._prepare(halves)
+        prog = tr.stitch(golds[0], golds[1], tree[0], depth=3)
+        _, _, vals, answers, _ = tr.rmt._prepare([task])
+        regs = run_program(tr.machine, vals, [prog], "cpu")
+        got = Fraction(regs.decode(tr._out_reg(3))[0])
+        assert got == Fraction(int(task[1]))
+
+
+def test_rft_rejects_a_program_that_is_right_only_by_coincidence():
+    # A constant program that happens to hit one instance's answer must fail on fresh
+    # operands. _generalises re-draws the operands of each found program's own problem.
+    tr = _trainer(depths=[1, 2], mode="rft")
+    tasks = tr._sample_batch(1, 6)
+    _, golds, _, _, _ = tr.rmt._prepare(tasks)
+    good = tr._generalises(tasks, [g for g in golds], tr._out_reg(1))
+    assert all(h is not None for h in good)                  # gold programs generalise
+    bogus = [[(0, 0, 0)] * tr.n_instr for _ in tasks]        # 1 + 1 on every instance
+    kept = tr._generalises(tasks, bogus, tr._out_reg(1))
+    assert all(h is None for h in kept)
