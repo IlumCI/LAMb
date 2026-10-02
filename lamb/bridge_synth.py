@@ -178,6 +178,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                    help="train the top N encoder layers (0 = frozen encoder)")
     p.add_argument("--enc-lr", type=float, default=3e-5)
     p.add_argument("--log-every", type=int, default=100)
+    p.add_argument("--train-jsonl", default=None,
+                   help="extra GSM8K-format rows ({question, answer}) added to the real pool")
     a = p.parse_args(argv)
 
     torch.manual_seed(a.seed)
@@ -186,6 +188,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                        answer_coef=0.0)
     train_fams = [f.__name__ for f in FAMILIES if f.__name__ not in HOLDOUT_FAMILIES]
     real = [r for r, e in zip(*_real_rows(cfg, "train")) if e.program is not None]
+    if a.train_jsonl:
+        import json
+        extra = [json.loads(line) for line in open(a.train_jsonl)]
+        ex, stats = build_examples(extra, cfg.n_operands, cfg.n_instr, cfg.constants, cfg.lexical)
+        # build_examples drops rows whose answer does not parse, so rows and examples are not
+        # positionally aligned; match by question text instead of zipping.
+        ok = {e.text for e in ex if e.program is not None}
+        kept = [r for r in extra if r["question"] in ok]
+        print(f"{a.train_jsonl}: {len(kept)}/{len(extra)} rows align to a program", flush=True)
+        real += kept
     real_frac = 1.0 if a.no_synth else a.real_frac
     stream = Stream(cfg, a.batch, real, real_frac, train_fams, a.seed)
     loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=a.workers,

@@ -2061,6 +2061,21 @@ a tenth of the numbers to improve on, and that is not where GSM8K fails. It fail
 0.66 of the operations sit in the question's equation. Generated sentences would teach the part that
 is already nearly solved, so the pilot was not built.
 
+**Pre-registered: does 75x more real-style programs lift the cap?** Every measurement above points
+at one constraint: there are too few real programs. GSM8K-Aug (Deng et al. 2023, arXiv 2311.01460)
+has about 385k problems, generated as variants of the GSM8K *train* questions and annotated in the
+same ``<<a*b=c>>`` format. It goes through the same aligner. It is data, not a model: nothing in it
+reads or reasons at test time. ``bridge_synth --no-synth --train-jsonl``, content pointer, frozen
+MiniLM, program-only loss, run on an A100. Held-out: GSM8K test, as always. The aug rows derive
+from train questions only, so the test split stays unseen.
+
+> Trained on GSM8K train plus the aligned GSM8K-Aug rows, the bridge reaches GSM8K-test exact match
+> >= 0.05, against 0.0129-0.0182 for every real-only arm above.
+
+A pass means data quantity was the cap. A fail means that more programs of GSM8K's own shapes do not
+teach composition either. The aug questions are variations on about 7k seeds, so the number of
+distinct structures grows far less than the number of rows.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
