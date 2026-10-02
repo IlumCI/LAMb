@@ -1989,6 +1989,21 @@ Encoder lr is 3e-5 and dropout is off in every arm. The claim:
 This is n=1 and is a pilot. A pass earns a multi-seed study. A fail means reading is not what the
 3.4M head is missing, at this data size.
 
+**Result: not met.** GSM8K-test exact match:
+
+| arm | step 1000 | step 2000 | step 3000 |
+|---|---|---|---|
+| frozen | 0.0121 | 0.0159 | 0.0129 |
+| top 2 layers | 0.0190 | 0.0197 | 0.0174 |
+| all 6 layers | 0.0235 | 0.0205 | 0.0182 |
+
+The unfrozen arms lead the frozen one at every evaluation by 0.004-0.011, which is 5-15 problems
+of 1319, from one seed. Neither comes near 0.03. Every arm reaches training loss ~0.03 by step 3000
+while test accuracy falls from its step-1000 value. Unfreezing makes the model fit the 5080 training
+programs faster; it does not make it read new problems. At this data size the cap is how few real
+programs there are, and how the encoder reads is not the binding constraint. The watchdog stopped
+nothing; the peak GPU temperature was 85C.
+
 **Measured: does GSM8K decompose into sentence-local facts?** The proposal is a formal layer between
 text and program. Each sentence becomes equations over named variables (`k = 50`, `n1 = k + k/2`),
 and an exact solver composes them, in the line of verb categorisation (Hosseini et al. 2014) and
