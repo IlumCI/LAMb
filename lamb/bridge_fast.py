@@ -58,9 +58,13 @@ class Bank:
                 h = enc_model(input_ids=t["input_ids"].to(device),
                               attention_mask=t["attention_mask"].to(device)).last_hidden_state
             lens = t["attention_mask"].sum(1)
+            # Copy out only the real tokens (row-major, so row j's tokens are contiguous). Keeping
+            # per-row slices of ``h`` instead held every padded batch alive: two banks built at
+            # once ran a 40 GB card out of memory.
+            chunks.append(h[t["attention_mask"].to(device).bool()].half().cpu())
+            del h
             for j, i in enumerate(idx):
                 L = int(lens[j])
-                chunks.append(h[j, :L].half())
                 offsets[i], lengths[i] = total, L
                 total += L
                 # Same rule as bridge_synth._anchors: first token ending past the quantity start.
