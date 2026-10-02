@@ -591,6 +591,20 @@ class BridgeReasoner(nn.Module):
         return (op_l, torch.cat([ca, a_l[..., n_op:]], -1),
                 torch.cat([cb, b_l[..., n_op:]], -1))
 
+    def logits(self, enc: torch.Tensor, pad_mask: torch.Tensor, counts: torch.Tensor,
+               anchors=None):
+        """Program logits without executing anything -- all a program-only loss needs.
+
+        Training on programs alone never reads the register file, so building it (the
+        Python-heavy part of a step) is skipped; execution is needed only to evaluate.
+        """
+        x = self.front(enc, pad_mask)
+        pad = torch.zeros(x.size(0), x.size(1), dtype=torch.bool, device=x.device)
+        _, _, latent_h, _ = self.core.latent_block(x, pad)
+        if self.cfg.content_pointer:
+            return self._content_logits(latent_h, enc, anchors, counts)
+        return self.machine.logits(latent_h, counts)
+
     def forward(self, enc: torch.Tensor, pad_mask: torch.Tensor,
                 values: Sequence[Sequence[Fraction]], counts: torch.Tensor,
                 tau: float = 0.0, hard: bool = False, anchors=None):

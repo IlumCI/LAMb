@@ -1936,6 +1936,48 @@ problems in the GSM8K style, where gold programs are free); the outcome-only exp
 which reached depth 3 on arithmetic, applied here so the 31% of problems without an annotation still train;
 and extraction recall, since 22% of test problems are missing a needed number before the model starts.
 
+**Pre-registered: does generated data fix the memorisation?** ``lamb/gsm_synth.py`` writes
+GSM8K-style problems (16 scenario families, phrasing variants, chains of 2-6 operations, implicit
+constants, written numerals, distractor numbers) in GSM8K's own annotation format, so they pass
+through the same parser and aligner as the real data (4000/4000 align and execute to their answer).
+No language model writes any of it. The risk is the obvious one: a model can memorise the
+*generator* instead of the 5080 real programs, and an early pilot shows it -- 0.92 on in-family
+generated problems by step 200, 0.15 on families never trained on, 0.01 on GSM8K. So three numbers are
+reported, never the first alone: real GSM8K test (the target), generated problems from four held-out
+families (``ages``, ``recipe``, ``combined_rate``, ``dozens``: did it learn to read quantities and
+relations, or the templates?), and in-family generated test. ``lamb/bridge_synth.py``, content pointer,
+program-only loss, frozen MiniLM run on the fly, 20000 steps of batch 64, same seed
+(*amended before any long-run result: 10000 steps of batch 128, the same 1.28M problems -- a
+step is launch-bound GPU work, and batch 256 does not fit the 3.7 GB card*):
+
+> Mixing generated problems with real GSM8K (half each) reaches GSM8K-test exact match >= 0.05 and
+> above the real-only arm trained identically. A generated-only arm is reported beside both as the
+> zero-shot transfer measurement.
+
+**Result: not met.** The mixed arm ran to step 8000 of 10000 before the machine shut down (cause not
+in the journal); the real-only and generated-only arms never started. Every evaluation it reached:
+
+| step | GSM8K test | held-out families | in-family |
+|---|---|---|---|
+| 2000 | 0.0159 | 0.035 | 0.978 |
+| 4000 | 0.0220 | 0.038 | 0.978 |
+| 6000 | 0.0167 | 0.078 | 0.973 |
+| 8000 | 0.0129 | 0.083 | 0.990 |
+
+GSM8K never leaves the 0.016 the real-only bridge already had, and it is falling at the last
+evaluation. In-family reaches 0.99 while families it never saw sit below 0.09. A third of the planned
+compute was left, and the step-8000 number is lower than the step-4000 one. So the missing arms would
+not turn this into a pass. The model learns the generator's templates. It does not learn to read
+quantities and relations that carry over to new problems. More data of the same shape does not
+address that, and the arms were not re-run.
+
+The obvious next fix would be a program family that cannot memorise whole problems: fold the
+quantities left to right in reading order, choosing each operation from local cue words. It was
+measured against the annotations before anything was built. Of the 5080 aligned training programs,
+0.409 are linear chains, and 0.259 are chains whose numbers appear in reading order. On test those
+figures are 0.386 and 0.239, which is 0.165 of all 1319 problems. A reading-order fold therefore caps
+out around a sixth of GSM8K. It is not the lever either.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
