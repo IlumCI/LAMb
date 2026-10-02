@@ -2048,6 +2048,19 @@ wrong programs land on. Similarity adds 5 points of coverage over chance. A rera
 programs would be choosing among coincidences it cannot tell apart without the answer, so that
 route is closed.
 
+**Sentence-level generated data: precondition failed, not built.** The plan was to train a per-number
+role classifier on generated sentences and test it on real ones. Each number would be classed as a
+fresh quantity, or as ADD, SUB, MUL, DIV or PART of something else. The roles were first derived
+from the 50 labels (``docs/factcheck/roles.py``). Labeller choices are collapsed, since a listed sum,
+a rate and a binding all introduce fresh quantities. Of the 148 numbers in real sentences, 122
+(0.82) are fresh quantities and 26 carry a local relation. A ten-line keyword rule ("more", "fewer",
+"times", "%" after the number) scores 0.905 overall against 0.824 for always guessing FRESH. Its
+misses are verb semantics ("loses 8", "30 flew away", "sold for $8 each"), about ten numbers in 50
+problems. The sentence-local layer is therefore mostly solved by rules. A learned model has at most
+a tenth of the numbers to improve on, and that is not where GSM8K fails. It fails in composition:
+0.66 of the operations sit in the question's equation. Generated sentences would teach the part that
+is already nearly solved, so the pilot was not built.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
