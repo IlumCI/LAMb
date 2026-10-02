@@ -2099,6 +2099,21 @@ curve flattens over the last 3000 steps (0.066, 0.060, 0.068, 0.068), so this is
 model reaches on this data, not a point on a rising line. It is one seed; it earns a multi-seed study
 before it is cited as a result.
 
+**Pre-registered: the multi-seed study of the GSM8K-Aug result.** ``lamb/bridge_fast.py``:
+the same model, aligner, anchors and exact evaluation. The frozen encoder runs once over every
+problem instead of on every batch, and the loss step is compiled. The config is identical to the n=1
+run (batch 256, 8000 steps, lr 3e-4, frozen MiniLM). The arms are paired by seed: ``aug`` (GSM8K
+train plus aligned GSM8K-Aug) and ``real`` (GSM8K train only), with the same seed, initialisation
+and sampler. There are six seeds, because the exact two-sided sign-flip test cannot go below
+2/2^n, so five seeds could never reach 0.05.
+
+> Over 6 paired seeds, ``aug`` beats ``real`` on final GSM8K-test exact match with exact paired
+> permutation p <= 0.05, and mean ``aug`` >= 0.05.
+
+Held-out families and in-family are reported beside it with the same test. If the precondition fails
+(the fast trainer does not reproduce the n=1 run's regime on seed 0), the study did not run. That
+is a different outcome from a failed result.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
