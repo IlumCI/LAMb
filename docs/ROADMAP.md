@@ -2027,6 +2027,27 @@ layer does make the hard step smaller and more structured: compose named facts, 
 on the labeller, since some operations could be pushed into fact sentences. The 0.94 depends on it
 much less.
 
+**Measured: is the trained bridge better than lookup?** No training is involved here.
+``docs/factcheck/retrieval.py`` takes the k nearest training problems by MiniLM mean-pooled
+similarity, runs their gold programs on the test problem's registers, and takes the majority answer.
+The control runs k *random* training programs the same way.
+
+| k | nearest: vote | random: vote | nearest: gold among k | random: gold among k |
+|---|---|---|---|---|
+| 25 | 0.0182 | 0.0152 | 0.168 | 0.121 |
+| 100 | 0.0387 | 0.0167 | 0.399 | 0.349 |
+| 300 | 0.0379 | 0.0265 | 0.646 | 0.614 |
+| 1000 | 0.0349 | 0.0250 | 0.820 | 0.815 |
+
+The trained bridge, at 0.013-0.018, scores the same as a majority vote over 100 *random* training
+programs (0.0167). Whatever it learned, it is no more than a prior over common program shapes.
+Plain retrieval beats it at 0.039, with no training. That the gold answer is "among the 100 nearest
+candidates 40% of the time" looked like a shortlist to rerank. The control shows it is almost all
+coincidence: 100 random programs reach 0.35, because GSM8K answers are small integers that many
+wrong programs land on. Similarity adds 5 points of coverage over chance. A reranker over retrieved
+programs would be choosing among coincidences it cannot tell apart without the answer, so that
+route is closed.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
