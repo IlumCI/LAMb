@@ -88,21 +88,41 @@ class Stream(torch.utils.data.IterableDataset):
 
 
 class Encoder:
-    """The frozen encoder, run on the fly on the GPU. Weights never move."""
+    """The pretrained encoder, run on the fly on the GPU.
 
-    def __init__(self, cfg: BridgeConfig, device: str):
+    ``unfreeze=0`` keeps every weight fixed and runs it in fp16. ``unfreeze=N`` trains the top
+    ``N`` transformer layers: the weights stay fp32 and the forward runs under autocast. Dropout
+    stays off, so frozen and unfrozen runs differ in exactly one thing: whether the top layers move.
+    """
+
+    def __init__(self, cfg: BridgeConfig, device: str, unfreeze: int = 0):
         from transformers import AutoModel, AutoTokenizer
 
-        self.cfg, self.device = cfg, device
+        self.cfg, self.device, self.unfreeze = cfg, device, unfreeze
         self.tok = AutoTokenizer.from_pretrained(cfg.encoder)
-        self.model = AutoModel.from_pretrained(cfg.encoder).to(device).eval().half()
+        self.model = AutoModel.from_pretrained(cfg.encoder).to(device).eval()
         self.model.requires_grad_(False)
+        if unfreeze:
+            for layer in self.model.encoder.layer[-unfreeze:]:
+                layer.requires_grad_(True)
+        else:
+            self.model.half()
 
-    @torch.no_grad()
+    def parameters(self):
+        return [p for p in self.model.parameters() if p.requires_grad]
+
     def __call__(self, ids, mask):
-        h = self.model(input_ids=ids.to(self.device),
-                       attention_mask=mask.to(self.device)).last_hidden_state
-        return h.float(), (mask == 0).to(self.device)
+        ids, mask = ids.to(self.device), mask.to(self.device)
+        if self.unfreeze and torch.is_grad_enabled():
+            with torch.autocast(self.device, dtype=torch.float16,
+                                enabled=self.device == "cuda"):
+                h = self.model(input_ids=ids, attention_mask=mask).last_hidden_state
+        else:
+            with torch.no_grad(), torch.autocast(self.device, dtype=torch.float16,
+                                                 enabled=self.device == "cuda" and
+                                                 bool(self.unfreeze)):
+                h = self.model(input_ids=ids, attention_mask=mask).last_hidden_state
+        return h.float(), mask == 0
 
     def batch(self, texts: Sequence[str]):
         t = self.tok(list(texts), padding=True, truncation=True, max_length=self.cfg.max_len,
@@ -154,6 +174,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save", default=None)
+    p.add_argument("--unfreeze", type=int, default=0,
+                   help="train the top N encoder layers (0 = frozen encoder)")
+    p.add_argument("--enc-lr", type=float, default=3e-5)
+    p.add_argument("--log-every", type=int, default=100)
     a = p.parse_args(argv)
 
     torch.manual_seed(a.seed)
@@ -166,9 +190,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     stream = Stream(cfg, a.batch, real, real_frac, train_fams, a.seed)
     loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=a.workers,
                                          prefetch_factor=4, persistent_workers=True)
-    encoder = Encoder(cfg, dev)
+    encoder = Encoder(cfg, dev, a.unfreeze)
     model = BridgeReasoner(cfg, encoder.model.config.hidden_size, dev).to(dev)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=cfg.weight_decay)
+    groups = [{"params": list(model.parameters()), "lr": a.lr}]
+    if a.unfreeze:
+        groups.append({"params": encoder.parameters(), "lr": a.enc_lr})
+    opt = torch.optim.AdamW(groups, weight_decay=cfg.weight_decay)
+    trainable = list(model.parameters()) + encoder.parameters()
 
     test_rows, test_ex = _real_rows(cfg, "test")
     rng = random.Random(99)
@@ -178,7 +206,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     held_ex, _ = build_examples(held, cfg.n_operands, cfg.n_instr, cfg.constants, cfg.lexical)
     infam_ex, _ = build_examples(infam, cfg.n_operands, cfg.n_instr, cfg.constants, cfg.lexical)
     print(f"real train rows with programs: {len(real)}; mix real_frac={real_frac}; "
-          f"held-out families {HOLDOUT_FAMILIES}; d_model={a.d_model}", flush=True)
+          f"held-out families {HOLDOUT_FAMILIES}; d_model={a.d_model}; "
+          f"unfrozen encoder layers {a.unfreeze} ({sum(p.numel() for p in encoder.parameters())} "
+          f"params at lr {a.enc_lr})", flush=True)
 
     t0, it = time.time(), iter(loader)
     for step in range(1, a.steps + 1):
@@ -190,8 +220,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             raise FloatingPointError(f"non-finite loss at step {step}")
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         opt.step()
+        if step % a.log_every == 0:      # a heartbeat the watchdog reads: a stalled run is visible
+            print(f"step {step:>6}  loss {float(loss.detach()):.4f}  "
+                  f"[{time.time() - t0:.0f}s]", flush=True)
         if step % a.eval_every == 0 or step == a.steps:
             gsm = exact_match(model, encoder, test_ex)
             ho = exact_match(model, encoder, held_ex)
@@ -201,9 +234,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                   f"[{time.time() - t0:.0f}s]", flush=True)
             if a.save:        # checkpoint at every evaluation: a long run must survive the machine
                 torch.save({"cfg": cfg.__dict__, "model": model.state_dict(),
+                            "encoder": encoder.model.state_dict() if a.unfreeze else None,
                             "opt": opt.state_dict(), "step": step}, a.save)
     if a.save:
-        torch.save({"cfg": cfg.__dict__, "model": model.state_dict()}, a.save)
+        torch.save({"cfg": cfg.__dict__, "model": model.state_dict(),
+                    "encoder": encoder.model.state_dict() if a.unfreeze else None}, a.save)
 
 
 def _real_rows(cfg: BridgeConfig, split: str):

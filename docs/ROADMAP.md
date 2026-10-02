@@ -1978,6 +1978,40 @@ measured against the annotations before anything was built. Of the 5080 aligned 
 figures are 0.386 and 0.239, which is 0.165 of all 1319 problems. A reading-order fold therefore caps
 out around a sixth of GSM8K. It is not the lever either.
 
+**Pre-registered pilot: is the frozen encoder the cap?** The test is whether the bridge reads better
+when it may change how it reads. Real GSM8K only (``--no-synth``), batch 64, 3000 steps, seed 0. Three
+arms differ only in ``--unfreeze``: 0 (frozen), 2 (top two MiniLM layers) and 6 (all, 10.6M params).
+Encoder lr is 3e-5 and dropout is off in every arm. The claim:
+
+> An unfrozen arm reaches GSM8K-test exact match >= 0.03 at step 3000, and above the frozen arm at
+> the same step.
+
+This is n=1 and is a pilot. A pass earns a multi-seed study. A fail means reading is not what the
+3.4M head is missing, at this data size.
+
+**Measured: does GSM8K decompose into sentence-local facts?** The proposal is a formal layer between
+text and program. Each sentence becomes equations over named variables (`k = 50`, `n1 = k + k/2`),
+and an exact solver composes them, in the line of verb categorisation (Hosseini et al. 2014) and
+quantity-relation trees (Roy & Roth 2015). Before building it, 50 random test problems
+(``random.Random(2026)``) were labelled by hand in a language fixed beforehand. The rule is that a
+number may appear only in the equation of its own sentence, and a few named world constants are
+allowed. A checker verifies every label mechanically: the locality of every literal, and that the
+sympy-solved system gives gold. Files are in ``docs/factcheck/``; the labels are from one labeller.
+
+* 47/50 (0.94) fit, and all 50 labels reproduce gold. 9 of the 47 use a world constant (dozen,
+  days per week, coin values). The three that do not fit need an arithmetic series (2) or a count of
+  named people (1).
+* 0.66 of all operations sit in the question's `ANSWER` equation. 0.39 of equations read a variable
+  defined in another sentence.
+
+So the numbers are local, and the composition is not. Facts can be read sentence by sentence, but
+two-thirds of the program ends up in the question sentence, assembled from variables named across
+the whole problem. Naming those variables consistently is coreference, a hidden requirement. The
+layer does make the hard step smaller and more structured: compose named facts, against today's
+"point into an unlabelled quantity file". It does not make the hard step disappear. The 0.66 depends
+on the labeller, since some operations could be pushed into fact sentences. The 0.94 depends on it
+much less.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
