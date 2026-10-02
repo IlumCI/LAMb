@@ -2076,6 +2076,29 @@ A pass means data quantity was the cap. A fail means that more programs of GSM8K
 teach composition either. The aug questions are variations on about 7k seeds, so the number of
 distinct structures grows far less than the number of rows.
 
+**Result: met, n=1.** 298,370 of the 385,620 aug rows align (0.774), on top of the 5080 real
+programs. A100, batch 256, 8000 steps, 26 minutes:
+
+| step | GSM8K test | held-out families | in-family | train loss |
+|---|---|---|---|---|
+| 1000 | 0.0356 | 0.178 | 0.210 | 0.48 |
+| 2000 | 0.0371 | 0.183 | 0.245 | 0.48 |
+| 3000 | 0.0485 | 0.257 | 0.323 | 0.42 |
+| 4000 | 0.0516 | 0.308 | 0.360 | 0.41 |
+| 5000 | 0.0660 | 0.245 | 0.413 | 0.38 |
+| 6000 | 0.0599 | 0.278 | 0.413 | 0.34 |
+| 7000 | 0.0682 | 0.245 | 0.373 | 0.35 |
+| 8000 | 0.0675 | 0.272 | 0.440 | 0.30 |
+
+GSM8K test ends at 0.0675, which is 89 of 1319 problems, against 17-24 for every real-only arm.
+Two things changed in kind, not just in degree. Training loss stays at 0.3, where every real-only
+arm went to 0.03, so the model is not memorising its programs. And it reaches 0.27 on the four
+generated families it never saw, without training on a single generated problem. That is three
+times the 0.083 of the arm that trained on the generator itself. The cap was data quantity. The
+curve flattens over the last 3000 steps (0.066, 0.060, 0.068, 0.068), so this is near what this
+model reaches on this data, not a point on a rising line. It is one seed; it earns a multi-seed study
+before it is cited as a result.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
