@@ -2130,6 +2130,22 @@ pre-registered p <= 0.05 needs both remaining pairs. Rerun them with
 ``python -m lamb.bridge_fast --arms aug real --seeds 2 5 --aug-jsonl <aug>`` and report all six
 pairs together. Nothing is claimed from four.
 
+**Pre-registered pilot: can the head's weights be ternary?** The goal is a model that is cheaper to
+*compute*, not just faster on one card. A matmul against weights in {-g, 0, +g} is additions plus
+one scale, and it is integer, so it can be exact (BitNet b1.58, arXiv 2402.17764; arXiv
+2406.02528). ``lamb/ternary.py`` quantises every 2-D weight in the head, including attention's
+packed projection. Embeddings, norms and learned queries stay float, and so do activations; the
+frozen encoder is not touched. Two runs, same data and seed as the aug arm (GSM8K train plus
+GSM8K-Aug, seed 0, batch 256, 8000 steps, uncompiled): float, with int8 and ternary post-training
+quantisation scored at the end; and ternary quantisation-aware training with the
+straight-through estimator.
+
+> Ternary QAT reaches GSM8K-test exact match within 0.01 of the float run at step 8000.
+
+Expected beside it, and reported either way: int8 PTQ within 0.005 of float, and ternary PTQ
+far below, since nothing in float training keeps the weights near three values. n=1: a pass earns
+seeds, not a claim.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and

@@ -133,9 +133,14 @@ def exact_match(model: BridgeReasoner, bank: Bank, batch: int = 512) -> float:
 
 def train_one(cfg: BridgeConfig, train: Bank, pool: torch.Tensor, evals: Dict[str, Bank],
               steps: int, batch: int, seed: int, eval_at: Sequence[int], compile_: bool,
-              d_enc: int, log=print) -> Dict[str, object]:
+              d_enc: int, log=print, ternary_qat: bool = False, ptq: bool = False,
+              save: Optional[str] = None) -> Dict[str, object]:
     torch.manual_seed(seed)
     model = BridgeReasoner(cfg, d_enc, cfg.device).to(cfg.device)
+    if ternary_qat:
+        from .ternary import coverage, ternarize_qat
+        log(f"  ternary QAT on {coverage(model):.3f} of parameters")
+        ternarize_qat(model)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     step_fn = make_step(model, compile_)
     gen = torch.Generator(device=cfg.device).manual_seed(seed)
@@ -157,7 +162,21 @@ def train_one(cfg: BridgeConfig, train: Bank, pool: torch.Tensor, evals: Dict[st
             hist.append(r)
             log(f"  seed {seed} " + "  ".join(f"{k} {v:.4f}" if isinstance(v, float) else
                                               f"{k} {v}" for k, v in r.items()))
-    return {"seed": seed, "history": hist, "seconds": time.time() - t0}
+    out = {"seed": seed, "history": hist, "seconds": time.time() - t0}
+    if ptq:
+        # Post-training quantisation of the trained float model, scored on the same banks.
+        import copy
+        from .ternary import coverage, int8, quantize_, ternary
+        out["coverage"] = coverage(model)
+        for name, fn in (("int8", int8), ("ternary", ternary)):
+            q = quantize_(copy.deepcopy(model), fn)
+            out[f"ptq_{name}"] = {k: exact_match(q, b) for k, b in evals.items()}
+            log(f"  seed {seed} PTQ {name} (coverage {out['coverage']:.3f}): " +
+                "  ".join(f"{k} {v:.4f}" for k, v in out[f"ptq_{name}"].items()))
+    if save:
+        torch.save({"cfg": cfg.__dict__, "model": model.state_dict(), "ternary_qat": ternary_qat},
+                   save)
+    return out
 
 
 def build_banks(cfg: BridgeConfig, aug_jsonl: Optional[str], log=print,
@@ -207,6 +226,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p.add_argument("--eval-at", type=int, nargs="+", default=[4000, 8000])
     p.add_argument("--no-compile", action="store_true")
     p.add_argument("--aug-limit", type=int, default=None, help="first N aug rows only (smoke runs)")
+    p.add_argument("--ternary-qat", action="store_true", help="train with ternary weights (STE)")
+    p.add_argument("--ptq", action="store_true", help="after training, score int8 and ternary PTQ")
+    p.add_argument("--save", default=None, help="checkpoint path (last arm/seed)")
     p.add_argument("--out", default="bridge_fast.json")
     a = p.parse_args(argv)
 
@@ -220,7 +242,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             print(f"arm {arm} seed {seed}: pool {len(pools[arm])}", flush=True)
             r = train_one(cfg, train, pools[arm], evals, a.steps, a.batch, seed,
                           set(a.eval_at), not a.no_compile, d_enc,
-                          log=lambda s: print(s, flush=True))
+                          log=lambda s: print(s, flush=True), ternary_qat=a.ternary_qat,
+                          ptq=a.ptq, save=a.save)
             results.append({"arm": arm, **r})
             json.dump(results, open(a.out, "w"), indent=1)
     if set(a.arms) == {"aug", "real"}:
