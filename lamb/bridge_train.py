@@ -263,7 +263,7 @@ def parse_annotation_steps(solution: str) -> Tuple[List[Step], int]:
 def align_program(reg_values: Sequence[Fraction], steps: Sequence[Step],
                   n_operands: int, n_instr: int, count: Optional[int] = None,
                   ops: Tuple[str, ...] = RATIONAL_OPS,
-                  identity_slot: int = 0) -> Optional[List[Instr]]:
+                  identity_slot: int = 0, bridge: bool = False) -> Optional[List[Instr]]:
     """Turn annotation steps into instructions over a concrete register file.
 
     An annotation names its operands by *value*, an instruction names them by
@@ -300,10 +300,47 @@ def align_program(reg_values: Sequence[Fraction], steps: Sequence[Step],
                 return i
         return None
 
+    def bridge_step(v: Fraction) -> Optional[Instr]:
+        """The one instruction over readable registers that produces ``v``, or ``None``.
+
+        Annotations skip steps: a stated ``40%`` is used as ``0.4``, a rate as ``1/100``,
+        without ever writing the division. Measured on test, 13.6% of problems fail
+        alignment that way and 5.5% on percents alone, against ~2% that lack a number the
+        extractor could find. A skipped step is recoverable *exactly* when a single
+        operation over values already in the file yields the operand. It is accepted only
+        when that is unambiguous: division by the constant 100 (a percent) first;
+        otherwise only if exactly one candidate exists, since two distinct instructions
+        that both produce ``v`` would make the label a guess. The whole program must
+        still reach the dataset's answer, which build_examples checks downstream.
+        """
+        cands: List[Instr] = []
+        for i, x in readable:
+            for j, y in readable:
+                for k, o in enumerate(ops):
+                    if o in "+*" and j < i:
+                        continue                      # commutative duplicate
+                    if o == "/" and y == 0:
+                        continue
+                    r = {"+": x + y, "-": x - y, "*": x * y, "/": x / y if y else None}[o]
+                    if r == v:
+                        cands.append((k, i, j))
+        pct = [c for c in cands if ops[c[0]] == "/" and c[2] < n_real
+               and reg_values[c[2]] == 100]
+        if pct:
+            return pct[0]
+        return cands[0] if len(cands) == 1 else None
+
     instrs: List[Instr] = []
     for a, op, b, res in steps:
         ia, ib = find(a), find(b)
-        if ia is None or ib is None:
+        for v, missing in ((a, ia is None), (b, ib is None)):
+            if missing and bridge:
+                ins = bridge_step(v)
+                if ins is not None:
+                    instrs.append(ins)
+                    readable.append((n_operands + len(instrs) - 1, v))
+        ia, ib = find(a), find(b)
+        if ia is None or ib is None or len(instrs) >= n_instr:
             return None
         instrs.append((ops.index(op), ia, ib))
         readable.append((n_operands + len(instrs) - 1, res))
@@ -372,8 +409,13 @@ def quantity_anchors(texts: Sequence[str], n_operands: int, n_const: int,
 
 def build_examples(rows: Sequence[Dict[str, str]], n_operands: int, n_instr: int,
                    constants: Sequence[int] = DEFAULT_CONSTANTS,
-                   lexical: bool = True) -> Tuple[List[Example], Dict[str, float]]:
+                   lexical: bool = True, bridge: bool = False
+                   ) -> Tuple[List[Example], Dict[str, float]]:
     """Problems to examples, with the coverage numbers that decide what is trainable.
+
+    ``bridge`` lets alignment insert one unambiguous instruction for an operand the
+    annotation used without writing (see ``align_program``). Off by default so every
+    earlier measurement reproduces exactly.
 
     Three failure rates, reported rather than absorbed, because every one of them
     caps what any model on top could possibly reach:
@@ -422,7 +464,7 @@ def build_examples(rows: Sequence[Dict[str, str]], n_operands: int, n_instr: int
                 n_no_program += 1
             else:
                 prog = align_program(ex.fractions, steps[:cut + 1], n_operands,
-                                     n_instr, count=c)
+                                     n_instr, count=c, bridge=bridge)
                 if prog is None:
                     n_operand_miss += 1
                     n_no_program += 1

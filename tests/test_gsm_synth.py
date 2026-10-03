@@ -40,3 +40,26 @@ def test_answers_are_nonnegative_integers_and_problems_vary():
 def test_generation_is_deterministic_per_seed():
     assert generate_rows(50, seed=11) == generate_rows(50, seed=11)
     assert generate_rows(50, seed=11) != generate_rows(50, seed=12)
+
+
+def test_bridging_recovers_a_percent_step_the_annotation_skipped():
+    """``40%`` used as ``0.4`` with no division written: alignment used to fail on it.
+
+    That shape was 5.5% of GSM8K test, and one-step gaps were 13.6%, against ~2% of problems that
+    lack a number the extractor could find. Bridging inserts ``40 / 100`` from the constant
+    register, and the program must still execute to the dataset's own answer. With bridging
+    off, the same row must stay unaligned, so earlier measurements reproduce.
+    """
+    from lamb.algebra import ResidueSystem
+    from lamb.regmachine import RegisterMachine
+
+    cfg = BridgeConfig()
+    row = {"question": "A shirt costs $50. It is on sale for 40% off. How much is the discount?",
+           "answer": "<<50*0.4=20>>\n#### 20"}
+    off, _ = build_examples([row], cfg.n_operands, cfg.n_instr, cfg.constants, cfg.lexical)
+    on, _ = build_examples([row], cfg.n_operands, cfg.n_instr, cfg.constants, cfg.lexical,
+                           bridge=True)
+    assert off[0].program is None and on[0].program is not None
+    machine = RegisterMachine(8, cfg.n_operands, cfg.n_instr,
+                              ResidueSystem(tuple(cfg.rational_moduli)), rational=True)
+    assert verify_alignment(on, machine) == 1.0

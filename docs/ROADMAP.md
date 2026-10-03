@@ -2134,6 +2134,28 @@ held, since seed 3 reproduced the n=1 run's 0.0675 exactly. Seeds 2 and 5 were r
 session on the same code and config. **Data quantity was the cap on the bridge, and that is now a
 result, not a single run.** The absolute level is still 7.5% of GSM8K.
 
+**Measured: what the alignment misses actually are.** The first unreadable annotation operand,
+by cause, on test (train in brackets). 13.6% (15.1%) of problems use a value one unwritten step
+from readable registers. 7.1% (5.2%) have chains that never reach the answer. 5.5% (5.2%) use a
+percent as a fraction. About 2% lack a number the extractor could find: word operators 0.8%,
+implicit constants 0.8%, register limit 0.2%, ``a/b`` literals 0.1%. The extractor is not the
+cap. ``align_program(bridge=True)`` inserts the skipped step when it is unambiguous: division by
+the constant 100 first, otherwise only a unique single-operation candidate. Coverage rises from
+0.680 to 0.756 on train and from 0.691 to 0.763 on test, and every bridged program still executes
+exactly to the dataset's answer. Of what is left on test, 163 problems are ambiguous (two or more
+distinct steps give the value, often six or more) and 9 need more than one step. Scoring every
+valid candidate as correct would recover the ambiguous ones without guessing; that is not built.
+
+**Pre-registered: do bridged labels help?** ``bridge_fast --bridge``, the same six seeds and config as
+the aug arm above. GSM8K train and GSM8K-Aug are aligned with bridging, so there are more supervised
+programs; evaluation is unchanged (all 1319 test problems). Paired by seed against the unbridged aug
+arm:
+
+> Bridged aug beats unbridged aug on final GSM8K-test exact match, exact paired permutation p <= 0.05.
+
+The expected effect is small against a seed sd of 0.0066, so a fail is the likely outcome and is
+reported as it lands.
+
 **Pre-registered pilot: can the head's weights be ternary?** The goal is a model that is cheaper to
 *compute*, not just faster on one card. A matmul against weights in {-g, 0, +g} is additions plus
 one scale, and it is integer, so it can be exact (BitNet b1.58, arXiv 2402.17764; arXiv

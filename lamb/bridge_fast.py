@@ -180,7 +180,7 @@ def train_one(cfg: BridgeConfig, train: Bank, pool: torch.Tensor, evals: Dict[st
 
 
 def build_banks(cfg: BridgeConfig, aug_jsonl: Optional[str], log=print,
-                limit: Optional[int] = None):
+                limit: Optional[int] = None, bridge: bool = False):
     from transformers import AutoModel, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(cfg.encoder)
@@ -188,12 +188,12 @@ def build_banks(cfg: BridgeConfig, aug_jsonl: Optional[str], log=print,
     t0 = time.time()
     real_rows = fetch_gsm8k("train", cfg.cache_dir)
     real_ex = [e for e in build_examples(real_rows, cfg.n_operands, cfg.n_instr, cfg.constants,
-                                         cfg.lexical)[0] if e.program is not None]
+                                         cfg.lexical, bridge=bridge)[0] if e.program is not None]
     aug_ex = []
     if aug_jsonl:
         rows = [json.loads(line) for line in open(aug_jsonl)][:limit]
         aug_ex = [e for e in build_examples(rows, cfg.n_operands, cfg.n_instr, cfg.constants,
-                                            cfg.lexical)[0] if e.program is not None]
+                                            cfg.lexical, bridge=bridge)[0] if e.program is not None]
     log(f"aligned: real {len(real_ex)}, aug {len(aug_ex)} [{time.time() - t0:.0f}s]")
     train = Bank(real_ex + aug_ex, cfg, tok, enc_model, cfg.device)
     log(f"train bank: {len(train)} problems, {train.flat.shape[0]} token states, "
@@ -229,12 +229,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p.add_argument("--ternary-qat", action="store_true", help="train with ternary weights (STE)")
     p.add_argument("--ptq", action="store_true", help="after training, score int8 and ternary PTQ")
     p.add_argument("--save", default=None, help="checkpoint path (last arm/seed)")
+    p.add_argument("--bridge", action="store_true",
+                   help="align with one-step bridging (more supervised programs)")
     p.add_argument("--out", default="bridge_fast.json")
     a = p.parse_args(argv)
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = BridgeConfig(content_pointer=True, d_model=256, lr=3e-4, device=dev, answer_coef=0.0)
-    train, n_real, evals, d_enc = build_banks(cfg, a.aug_jsonl, limit=a.aug_limit)
+    train, n_real, evals, d_enc = build_banks(cfg, a.aug_jsonl, limit=a.aug_limit, bridge=a.bridge)
     pools = {"real": torch.arange(n_real, device=dev), "aug": torch.arange(len(train), device=dev)}
     results: List[Dict[str, object]] = []
     for seed in a.seeds:                       # seed-major: each pair completes before the next
