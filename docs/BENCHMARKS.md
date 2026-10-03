@@ -193,10 +193,12 @@ What it reports, and what to read first:
   calculator annotations (`<<48/2=24>>`), so this dataset *does* supply a gold
   program — contrary to the premise that made the bridge look like a leap. Only
   single-binary-operation annotations are usable; the rest are rejected and counted.
-- **`operand_miss` — extraction recall, and the real ceiling.** The share of rows
-  whose annotation names a number the extractor never found. If the numbers are not
-  in the register file, no program over it can be right, and that has nothing to do
-  with the network. Read it before reading any accuracy.
+- **`operand_miss` — alignment misses, mostly not extraction.** The share of rows
+  whose annotation names a value the register file does not hold. Measured by cause on
+  test, it is mostly *not* a missing number. 13.6% of problems use a value one unwritten step
+  from readable registers (``0.4`` for a stated ``40%``, ``1/100``), and 5.5% use a percent as a
+  fraction. Only about 2% lack a number the extractor could find. So it is a ceiling on the
+  *supervised labels*, and only a small part of it is a ceiling on what any program could do.
 - **Alignment execution rate.** A program recovered from someone else's annotations
   is a hypothesis; `verify_alignment` executes it in this ring and asks whether it
   reproduces the dataset's own answer. Training on one that does not would teach the

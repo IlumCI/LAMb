@@ -223,8 +223,9 @@ Retracted above). Supervision is the mechanism that works, and 61% of GSM8K supp
 it.
 
 Three numbers are printed before training, because each caps what any model on top
-could reach: annotation coverage, `operand_miss` (the share of rows naming a number
-the extractor never found — extraction recall, nothing to do with the network), and
+could reach: annotation coverage, `operand_miss` (the share of rows naming a value
+the register file does not hold — mostly annotations that skip a step, only ~2% of test a
+number the extractor missed), and
 whether a recovered program actually *executes* to the dataset's stated answer.
 
 **No accuracy is claimed.** It is built and unmeasured. `extract_quantities` cannot

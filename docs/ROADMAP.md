@@ -1934,7 +1934,9 @@ its plan -- the opposite of the point. It remains only as the measuring arm 3c a
 What would plausibly move the number, in order: far more program-annotated data than 5080 (self-generated
 problems in the GSM8K style, where gold programs are free); the outcome-only expert iteration of 3e-ii,
 which reached depth 3 on arithmetic, applied here so the 31% of problems without an annotation still train;
-and extraction recall, since 22% of test problems are missing a needed number before the model starts.
+and alignment coverage (*corrected below: "22% missing a needed number" was wrong. Measured by
+cause, about 2% of test problems lack a number the extractor could find. The rest of the
+alignment failures are annotations that skip a step, or chains that never reach the answer*).
 
 **Pre-registered: does generated data fix the memorisation?** ``lamb/gsm_synth.py`` writes
 GSM8K-style problems (16 scenario families, phrasing variants, chains of 2-6 operations, implicit
@@ -2114,21 +2116,23 @@ Held-out families and in-family are reported beside it with the same test. If th
 (the fast trainer does not reproduce the n=1 run's regime on seed 0), the study did not run. That
 is a different outcome from a failed result.
 
-**Status: incomplete, criterion not yet evaluated.** The session ended with four of six pairs
-finished (A100, four processes sharing the card). Final step-8000 numbers:
+**Result: met.** Six paired seeds, final step-8000 exact match:
 
 | seed | aug GSM8K | real GSM8K | aug held-out | real held-out |
 |---|---|---|---|---|
 | 0 | 0.0728 | 0.0114 | 0.308 | 0.035 |
 | 1 | 0.0751 | 0.0174 | 0.295 | 0.022 |
+| 2 | 0.0864 | 0.0159 | 0.363 | 0.047 |
 | 3 | 0.0675 | 0.0136 | 0.225 | 0.022 |
 | 4 | 0.0705 | 0.0197 | 0.313 | 0.032 |
+| 5 | 0.0781 | 0.0106 | 0.170 | 0.015 |
 
-Seeds 2 and 5 were still training. The precondition held: aug seed 3 reproduced the n=1 run's
-0.0675 exactly. With four pairs, the exact two-sided test cannot go below 2/16 = 0.125, so the
-pre-registered p <= 0.05 needs both remaining pairs. Rerun them with
-``python -m lamb.bridge_fast --arms aug real --seeds 2 5 --aug-jsonl <aug>`` and report all six
-pairs together. Nothing is claimed from four.
+GSM8K test: aug 0.0751 (sd 0.0066) against real 0.0148 (sd 0.0035). The paired difference is
++0.0603, aug wins 6/6, and the exact two-sided sign-flip test gives p = 0.0312, the smallest six
+seeds can give. Held-out families: 0.279 against 0.029, also 6/6, p = 0.0312. The precondition
+held, since seed 3 reproduced the n=1 run's 0.0675 exactly. Seeds 2 and 5 were run in a second
+session on the same code and config. **Data quantity was the cap on the bridge, and that is now a
+result, not a single run.** The absolute level is still 7.5% of GSM8K.
 
 **Pre-registered pilot: can the head's weights be ternary?** The goal is a model that is cheaper to
 *compute*, not just faster on one card. A matmul against weights in {-g, 0, +g} is additions plus
