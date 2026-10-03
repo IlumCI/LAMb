@@ -86,7 +86,12 @@ def fetch_gsm8k(split: str = "train", cache_dir: str = DEFAULT_CACHE
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, f"{split}.jsonl")
     if not os.path.exists(path):
-        urllib.request.urlretrieve(f"{GSM8K_BASE}/{split}.jsonl", path)
+        # Download to a private temp name and rename: two processes started on a fresh machine
+        # both fetched to ``path`` and one parsed the other's half-written file (JSONDecodeError
+        # on a 4-process Colab launch). ``os.replace`` is atomic, so a reader sees all or nothing.
+        tmp = f"{path}.{os.getpid()}.tmp"
+        urllib.request.urlretrieve(f"{GSM8K_BASE}/{split}.jsonl", tmp)
+        os.replace(tmp, path)
     with open(path, encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
