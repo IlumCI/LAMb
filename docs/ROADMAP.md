@@ -2146,6 +2146,22 @@ Expected beside it, and reported either way: int8 PTQ within 0.005 of float, and
 far below, since nothing in float training keeps the weights near three values. n=1: a pass earns
 seeds, not a claim.
 
+**Result: not met, by 0.002.** Step 8000, seed 0, 0.991 of the head's parameters quantised:
+
+| model | GSM8K test | held-out families | in-family |
+|---|---|---|---|
+| float | 0.0720 | 0.267 | 0.490 |
+| float, int8 after training | 0.0720 | 0.260 | 0.492 |
+| float, ternary after training | 0.0053 | 0.002 | 0.002 |
+| ternary-aware training | 0.0599 | 0.208 | 0.452 |
+
+Ternary-aware training lands 0.0121 below float, against a 0.01 margin, so the criterion fails as
+written. In size: it keeps 83% of float's GSM8K accuracy and 92% of in-family, and it is still
+four times the real-data-only bridge, with every head matmul reduced to additions. Rounding a
+float model to ternary after the fact destroys it (0.005), which is exactly why training under the
+constraint matters. int8 is free: identical to float on GSM8K. One seed each, so the 0.012 gap
+itself is not resolved; the seed-to-seed spread of the float aug arm is about 0.006.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
