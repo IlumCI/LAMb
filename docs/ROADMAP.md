@@ -2114,6 +2114,22 @@ Held-out families and in-family are reported beside it with the same test. If th
 (the fast trainer does not reproduce the n=1 run's regime on seed 0), the study did not run. That
 is a different outcome from a failed result.
 
+**Status: incomplete, criterion not yet evaluated.** The session ended with four of six pairs
+finished (A100, four processes sharing the card). Final step-8000 numbers:
+
+| seed | aug GSM8K | real GSM8K | aug held-out | real held-out |
+|---|---|---|---|---|
+| 0 | 0.0728 | 0.0114 | 0.308 | 0.035 |
+| 1 | 0.0751 | 0.0174 | 0.295 | 0.022 |
+| 3 | 0.0675 | 0.0136 | 0.225 | 0.022 |
+| 4 | 0.0705 | 0.0197 | 0.313 | 0.032 |
+
+Seeds 2 and 5 were still training. The precondition held: aug seed 3 reproduced the n=1 run's
+0.0675 exactly. With four pairs, the exact two-sided test cannot go below 2/16 = 0.125, so the
+pre-registered p <= 0.05 needs both remaining pairs. Rerun them with
+``python -m lamb.bridge_fast --arms aug real --seeds 2 5 --aug-jsonl <aug>`` and report all six
+pairs together. Nothing is claimed from four.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
