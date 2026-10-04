@@ -2156,6 +2156,15 @@ arm:
 The expected effect is small against a seed sd of 0.0066, so a fail is the likely outcome and is
 reported as it lands.
 
+**Result: not met.** Bridging added 570 real programs (5080 to 5650) and 23,157 aug programs
+(298,363 to 321,520). Final GSM8K test by seed 0-5: bridged 0.0690, 0.0728, 0.0796, 0.0697,
+0.0842, 0.0697 (mean 0.0742, sd 0.0063), against unbridged 0.0728, 0.0751, 0.0864, 0.0675, 0.0705,
+0.0781 (mean 0.0751). Paired difference -0.0009, bridged better in 2/6, p = 0.81. Eight per cent
+more programs of the same kind do nothing measurable. That fits the data being the cap only in
+the sense of *kinds* of programs: the bridged rows add more examples of shapes the aug set
+already has many of. Bridging stays in the code as a coverage tool (it raises the labelled share
+of test from 0.691 to 0.763), off by default.
+
 **Pre-registered pilot: can the head's weights be ternary?** The goal is a model that is cheaper to
 *compute*, not just faster on one card. A matmul against weights in {-g, 0, +g} is additions plus
 one scale, and it is integer, so it can be exact (BitNet b1.58, arXiv 2402.17764; arXiv
