@@ -2188,6 +2188,30 @@ float model to ternary after the fact destroys it (0.005), which is exactly why 
 constraint matters. int8 is free: identical to float on GSM8K. One seed each, so the 0.012 gap
 itself is not resolved; the seed-to-seed spread of the float aug arm is about 0.006.
 
+**Pre-registered: a translator that cannot reason.** Natural-language output must not let a
+language model do LAMb's thinking. ``lamb/translator.py`` makes that structural rather than
+trained:
+* every number and name is a typed slot (``<Q>`` quantity, ``<K>`` constant, ``<R>`` result,
+  ``<N>`` name), added as single tokens, so the model never sees a value and values are copied
+  in only after decoding;
+* the model sees one instruction plus the question sentences its operands depend on, with every
+  quantity and name slotted, and never the whole problem;
+* there is one sentence per instruction, in program order;
+* decoding bans every digit token and allows only the sentence's closed vocabulary: its input
+  words, a fixed glue list, its slots, punctuation;
+* every sentence is validated, and falls back to a deterministic renderer if it fails.
+
+Training pairs come from GSM8K train and GSM8K-Aug-NL (sentences row-aligned with GSM8K-Aug's
+annotated steps), and only sentences whose every word is in the closed vocabulary are used.
+SmolLM2-135M, full fine-tune. On 600 GSM8K-test steps:
+
+> (1) At least 0.90 of sentences are valid without fallback. (2) With each step's operation
+> rotated to a different one, the sentence's wording follows the given operation at least 0.8
+> times as often as with the true operation.
+
+The cue lists that score (2) are crude keyword families, so (2) is a floor on faithfulness, not a
+measure of quality. Numbers come from LAMb's registers in 100% of outputs by construction.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
