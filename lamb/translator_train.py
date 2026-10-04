@@ -81,8 +81,10 @@ def main(argv=None):
         return {"input_ids": ids, "labels": ([-100] * len(pi) + ti)[-512:]}
 
     ds = [encode(r) for r in train]
+    total = int(-(-len(ds) // 64) * a.epochs)
     args = TrainingArguments(a.out, per_device_train_batch_size=64, num_train_epochs=a.epochs,
-                             learning_rate=3e-4, warmup_ratio=0.03, lr_scheduler_type="cosine",
+                             learning_rate=3e-4, warmup_steps=max(1, int(0.03 * total)),
+                             lr_scheduler_type="cosine",
                              bf16=True, logging_steps=100, save_strategy="no", report_to=[])
     Trainer(model=model, args=args, train_dataset=ds,
             data_collator=DataCollatorForSeq2Seq(tok, padding=True, label_pad_token_id=-100)).train()
