@@ -2212,6 +2212,22 @@ SmolLM2-135M, full fine-tune. On 600 GSM8K-test steps:
 The cue lists that score (2) are crude keyword families, so (2) is a floor on faithfulness, not a
 measure of quality. Numbers come from LAMb's registers in 100% of outputs by construction.
 
+**Result: (1) met, (2) not met.** Training used 13,452 fully covered pairs, out of 73,543 built
+(60,249 from 302,789 paired Aug-NL rows, and 13,294 from GSM8K train), for 2 epochs; 4.4 minutes
+on the A100. On 600 GSM8K-test steps, 0.986 of sentences are valid without fallback. Keyword
+agreement with the operation is 0.354 for the true operation and 0.220 with it rotated, against a
+required 0.283, so (2) fails as written. The diagnostics below were *not* pre-registered.
+Generated sentences overwhelmingly carry a slot formula (0.970). The formula's operator matches
+the given operation 0.962 of the time with the true operation and 0.968 with it rotated, so the
+structure follows LAMb's program and not the context. The keyword measure mostly failed because
+the sentences use symbols instead of cue words. At most 5% of sentences pair ``+``/``-`` wording with the other operation (0.052 with the true
+operation, 0.046 rotated). That is an upper bound. "<Q1>-<R1>=<R2> more than" is correct GSM8K
+phrasing for a difference, and the cue lists cannot tell it from a contradiction. The equal rate
+under rotation says the wording comes from the closed vocabulary letting the input's words
+through, not from the model solving anything. A validation rule on these cue lists would reject
+correct sentences, so none was added. Measuring word-level faithfulness properly needs a better
+instrument than keyword families.
+
 ## 3d. infContext meets the register machine: the pillar nothing tests
 
 The memory pillar and the reasoning pillar do not touch. `memory_bench` and
